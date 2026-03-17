@@ -38,3 +38,4 @@ class CheckpointStep(str, enum.Enum):
     card_opened = "card_opened"
     tab_opened = "tab_opened"
     data_extracted = "data_extracted"
+    done = "done"

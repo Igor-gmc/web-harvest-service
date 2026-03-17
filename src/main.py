@@ -34,9 +34,30 @@ async def run_import() -> None:
     )
 
 
+async def run_recovery() -> None:
+    from src.services.task_service import recover_stale_tasks
+
+    logger = get_logger(__name__)
+    async with async_session() as session:
+        recovered = await recover_stale_tasks(session)
+    if recovered:
+        logger.info("Recovery: recovered=%d stale task(s)", recovered)
+    else:
+        logger.info("Recovery: no stale tasks")
+
+
+async def run_next_task() -> None:
+    from src.services.worker_service import run_worker
+
+    async with async_session() as session:
+        await run_worker(session)
+
+
 async def startup() -> None:
     await check_db()
     await run_import()
+    await run_recovery()
+    await run_next_task()
 
 
 def main() -> None:
