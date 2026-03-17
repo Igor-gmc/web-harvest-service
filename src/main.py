@@ -19,6 +19,26 @@ async def check_db() -> None:
     logger.info("Database connection successful")
 
 
+async def run_import() -> None:
+    from src.services.excel_reader import read_identifiers
+    from src.services.task_service import import_tasks
+
+    read_result = read_identifiers()
+    async with async_session() as session:
+        import_result = await import_tasks(session, read_result.valid)
+    logger = get_logger(__name__)
+    logger.info(
+        "Tasks in DB: created=%d, skipped=%d",
+        import_result.created,
+        import_result.skipped,
+    )
+
+
+async def startup() -> None:
+    await check_db()
+    await run_import()
+
+
 def main() -> None:
     setup_logger()
     logger = get_logger(__name__)
@@ -26,10 +46,9 @@ def main() -> None:
     logger.info("Application started")
     logger.info("App name: %s", settings.app_name)
     logger.info("Environment: %s", settings.app_env)
-
-    asyncio.run(check_db())
-
     logger.info("Headless: %s", settings.playwright_headless)
+
+    asyncio.run(startup())
 
 
 if __name__ == "__main__":
