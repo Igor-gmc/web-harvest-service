@@ -1,3 +1,5 @@
+import asyncio
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.browser.factory import BrowserFactory
@@ -10,42 +12,52 @@ from src.services.task_service import fail_task
 
 logger = get_logger(__name__)
 
+POLL_INTERVAL_SECONDS = 5
 
-async def run_batch(factory: BrowserFactory, worker_name: str = "direct_worker") -> int:
-    """Batch worker: обрабатывает все доступные задачи и завершается.
 
-    Переиспользует вкладку браузера между задачами:
-    - После успеха: page на главной (клик по логотипу)
-    - После «Ничего не найдено»: page на странице результатов
-    - После ошибки: page закрыт executor'ом, берём новую
+async def run_stage_worker(
+    factory: BrowserFactory,
+    task_type: str,
+    worker_name: str = "worker",
+    stop_event: asyncio.Event | None = None,
+    poll: bool = False,
+) -> int:
+    """Воркер одного этапа: обрабатывает задачи указанного task_type.
 
-    Возвращает количество обработанных задач.
+    Переиспользует вкладку браузера между задачами.
+
+    Args:
+        factory: BrowserFactory для этого воркера (свой CDP порт).
+        task_type: "fedresurs" или "kad_arbitr".
+        worker_name: Имя воркера для логов и lock.
+        stop_event: Если установлен — воркер завершается даже если poll=True.
+        poll: Если True — при пустой очереди ждёт новых задач (для stage2).
+              Если False — завершается при пустой очереди (для stage1).
+
+    Returns:
+        Количество обработанных задач.
     """
     processed = 0
     reuse_page = None
     on_results = False
-    prev_task_type: str | None = None
 
     while True:
         async with async_session() as session:
-            task = await acquire_next_task(session, worker_name, settings.lock_ttl_seconds)
+            task = await acquire_next_task(
+                session, worker_name, settings.lock_ttl_seconds, task_type=task_type,
+            )
+
             if task is None:
+                # poll=True: ждём новых задач, пока stage1 ещё работает
+                if poll and (stop_event is None or not stop_event.is_set()):
+                    await asyncio.sleep(POLL_INTERVAL_SECONDS)
+                    continue
+                # stage1 завершён (stop_event set) и очередь пуста → выходим
                 break
 
-            # При смене task_type — сбросить page (разные сайты)
-            if prev_task_type and task.task_type != prev_task_type and reuse_page is not None:
-                logger.info(
-                    "Task type changed: %s -> %s, releasing page",
-                    prev_task_type, task.task_type,
-                )
-                await factory.release_page(reuse_page)
-                reuse_page = None
-                on_results = False
-            prev_task_type = task.task_type
-
             logger.info(
-                "Task acquired: id=%d, type=%s, source_value=%s",
-                task.id, task.task_type, task.source_value,
+                "[%s] Task acquired: id=%d, source=%s",
+                worker_name, task.id, task.source_value,
             )
 
             try:
@@ -56,7 +68,7 @@ async def run_batch(factory: BrowserFactory, worker_name: str = "direct_worker")
                 )
             except Exception as exc:
                 logger.error(
-                    "Unexpected error in worker loop: task_id=%d, error=%s", task.id, exc,
+                    "[%s] Unexpected error: task_id=%d, error=%s", worker_name, task.id, exc,
                 )
                 await _safe_fail(session, task, exc)
                 reuse_page = None
@@ -67,7 +79,7 @@ async def run_batch(factory: BrowserFactory, worker_name: str = "direct_worker")
     if reuse_page is not None:
         await factory.release_page(reuse_page)
 
-    logger.info("Batch complete: processed=%d", processed)
+    logger.info("[%s] Worker finished: processed=%d", worker_name, processed)
     return processed
 
 

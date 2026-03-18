@@ -31,20 +31,6 @@ async def run_import() -> None:
     )
 
 
-async def run_kad_import() -> None:
-    from src.services.task_service import import_kad_arbitr_tasks
-
-    logger = get_logger(__name__)
-    async with async_session() as session:
-        result = await import_kad_arbitr_tasks(session)
-    logger.info(
-        "KadArbitr tasks from DB: created=%d, reset=%d, skipped=%d",
-        result.created,
-        result.reset,
-        result.skipped,
-    )
-
-
 async def run_recovery() -> None:
     from src.services.task_service import recover_stale_tasks
 
@@ -57,26 +43,49 @@ async def run_recovery() -> None:
         logger.info("Recovery: no stale tasks")
 
 
-async def run_worker_batch() -> None:
+async def run_parallel_workers() -> None:
     from src.browser.factory import BrowserFactory
-    from src.services.worker_runner import run_batch
+    from src.services.worker_runner import run_stage_worker
 
     logger = get_logger(__name__)
-    async with BrowserFactory() as factory:
-        logger.info("Browser ready, starting worker batch...")
-        processed = await run_batch(factory)
-    logger.info("Worker batch finished: total=%d", processed)
+
+    # Stage1 завершается когда очередь fedresurs пуста.
+    # Stage2 поллит БД, пока stage1 работает, потом дорабатывает остаток и завершается.
+    stage1_done = asyncio.Event()
+
+    async def stage1():
+        async with BrowserFactory(cdp_port=settings.cdp_port) as factory:
+            logger.info("Stage1 (fedresurs) browser ready, port=%d", settings.cdp_port)
+            processed = await run_stage_worker(
+                factory,
+                task_type="fedresurs",
+                worker_name="stage1_fedresurs",
+            )
+        logger.info("Stage1 (fedresurs) finished: processed=%d", processed)
+        stage1_done.set()
+
+    async def stage2():
+        # Даём stage1 немного времени начать работу
+        await asyncio.sleep(3)
+        async with BrowserFactory(cdp_port=settings.cdp_port_stage2) as factory:
+            logger.info("Stage2 (kad_arbitr) browser ready, port=%d", settings.cdp_port_stage2)
+            processed = await run_stage_worker(
+                factory,
+                task_type="kad_arbitr",
+                worker_name="stage2_kad_arbitr",
+                stop_event=stage1_done,
+                poll=True,
+            )
+        logger.info("Stage2 (kad_arbitr) finished: processed=%d", processed)
+
+    await asyncio.gather(stage1(), stage2())
 
 
 async def startup() -> None:
     await check_db()
     await run_import()
-    await run_kad_import()
     await run_recovery()
-    await run_worker_batch()
-    # Второй проход: после fedresurs появились case_number → создаём kad_arbitr задачи
-    await run_kad_import()
-    await run_worker_batch()
+    await run_parallel_workers()
 
 
 def main() -> None:

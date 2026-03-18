@@ -8,7 +8,7 @@ from src.core.config import settings
 from src.core.enums import CheckpointStep, ErrorType
 from src.core.logger import get_logger
 from src.db.models import ParseTask
-from src.db.repositories import refresh_heartbeat, save_fedresurs_result, save_kad_arbitr_result
+from src.db.repositories import create_task, get_task, refresh_heartbeat, save_fedresurs_result, save_kad_arbitr_result
 from src.services.task_service import complete_task, fail_task, not_found_task, update_checkpoint
 
 logger = get_logger(__name__)
@@ -118,6 +118,15 @@ async def execute_task(
     if task.task_type == "fedresurs":
         for result in results:
             await save_fedresurs_result(session, result)
+        # Автоматически создать kad_arbitr задачу из case_number
+        for result in results:
+            existing = await get_task(session, "kad_arbitr", result.case_number)
+            if not existing:
+                await create_task(session, "kad_arbitr", result.case_number)
+                logger.info(
+                    "Auto-created kad_arbitr task: case=%s, from task_id=%d",
+                    result.case_number, task.id,
+                )
     elif task.task_type == "kad_arbitr":
         for result in results:
             await save_kad_arbitr_result(session, result)

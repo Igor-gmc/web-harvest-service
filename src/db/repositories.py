@@ -106,22 +106,30 @@ async def get_stale_tasks(session: AsyncSession) -> list[ParseTask]:
 
 
 async def acquire_next_task(
-    session: AsyncSession, worker_name: str, lock_ttl_seconds: int
+    session: AsyncSession,
+    worker_name: str,
+    lock_ttl_seconds: int,
+    task_type: str | None = None,
 ) -> ParseTask | None:
-    """Выбирает следующую задачу (resume_pending приоритетнее pending) и переводит её в in_progress.
+    """Выбирает следующую задачу и переводит её в in_progress.
 
-    Заполняет worker_name, locked_by, started_at, last_heartbeat_at, lock_expires_at.
+    Использует FOR UPDATE SKIP LOCKED для безопасной параллельной работы воркеров.
+    resume_pending приоритетнее pending.
+    Если task_type указан — берёт только задачи этого типа.
     Commit выполняется здесь — захват атомарен.
-    Возвращает задачу или None если очередь пуста.
     """
     task: ParseTask | None = None
     for status in (TaskStatus.resume_pending, TaskStatus.pending):
-        result = await session.execute(
+        stmt = (
             select(ParseTask)
             .where(ParseTask.status == status)
             .order_by(ParseTask.id)
             .limit(1)
+            .with_for_update(skip_locked=True)
         )
+        if task_type is not None:
+            stmt = stmt.where(ParseTask.task_type == task_type)
+        result = await session.execute(stmt)
         task = result.scalar_one_or_none()
         if task is not None:
             break
