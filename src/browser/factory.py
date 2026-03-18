@@ -1,4 +1,5 @@
 import asyncio
+import os
 import shutil
 import subprocess
 import tempfile
@@ -17,18 +18,50 @@ from src.core.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Где искать Chrome на Windows
-_CHROME_PATHS = [
+# Где искать Chrome/Chromium
+_CHROME_PATHS_WINDOWS = [
     r"C:\Program Files\Google\Chrome\Application\chrome.exe",
     r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
 ]
 
+_CHROME_PATHS_LINUX = [
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+]
+
+
+def _find_playwright_chromium() -> str | None:
+    """Ищет Chromium, установленный через playwright install."""
+    cache_dir = Path.home() / ".cache" / "ms-playwright"
+    if not cache_dir.exists():
+        return None
+    for chromium_dir in sorted(cache_dir.glob("chromium-*"), reverse=True):
+        executable = chromium_dir / "chrome-linux" / "chrome"
+        if executable.exists():
+            return str(executable)
+    return None
+
 
 def _find_chrome() -> str:
-    """Находит путь к системному Chrome."""
-    for path in _CHROME_PATHS:
+    """Находит путь к системному Chrome/Chromium."""
+    # 1. Переменная окружения
+    env_path = os.environ.get("CHROME_PATH")
+    if env_path and Path(env_path).exists():
+        return env_path
+
+    # 2. Системные пути (Windows / Linux)
+    candidates = _CHROME_PATHS_WINDOWS if os.name == "nt" else _CHROME_PATHS_LINUX
+    for path in candidates:
         if Path(path).exists():
             return path
+
+    # 3. Playwright-бандл (Docker)
+    pw_path = _find_playwright_chromium()
+    if pw_path:
+        return pw_path
+
     raise FileNotFoundError(
         "Chrome not found. Install Google Chrome or set CHROME_PATH in .env"
     )
@@ -81,6 +114,12 @@ class BrowserFactory:
             "--no-first-run",
             "--no-default-browser-check",
         ]
+
+        # В Docker (Linux) нужен --no-sandbox (запуск от root).
+        # Headless НЕ используем — Docker запускает Xvfb (виртуальный дисплей),
+        # чтобы Chrome работал в headed-режиме и WAF не детектил headless.
+        if os.name != "nt":
+            cmd.append("--no-sandbox")
 
         self._chrome_process = subprocess.Popen(
             cmd,

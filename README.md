@@ -4,6 +4,8 @@
 
 ## Как пользоваться
 
+![Веб-интерфейс](docs/screenshot.png)
+
 1. Откройте веб-интерфейс в браузере (по умолчанию `http://localhost:8000`)
 2. Загрузите `.xlsx` файл со списком ИНН (перетащите или нажмите на зону загрузки)
 3. Нажмите **Запустить парсинг** — сервис последовательно обработает каждый ИНН:
@@ -24,7 +26,7 @@
 - **Playwright** — браузерная автоматизация через CDP
 - **PostgreSQL 16** + SQLAlchemy 2.0 (async) + Alembic
 - **Pydantic Settings** — конфигурация из `.env`
-- **Docker Compose** — PostgreSQL + приложение
+- **Docker Compose** — PostgreSQL + приложение + Xvfb
 
 ## Запуск
 
@@ -57,7 +59,7 @@ uvicorn src.web.app:app --host 0.0.0.0 --port 8000
 
 Откройте `http://localhost:8000` в браузере.
 
-### Вариант 2: Docker (полный сервис на хосте)
+### Вариант 2: Docker (полный сервис)
 
 **Требования:** Docker и Docker Compose.
 
@@ -66,7 +68,14 @@ uvicorn src.web.app:app --host 0.0.0.0 --port 8000
 docker compose up -d --build
 ```
 
-Сервис будет доступен на `http://localhost:8000`. PostgreSQL поднимается автоматически, миграции применяются при старте контейнера.
+Сервис будет доступен на `http://localhost:8000`. PostgreSQL поднимается автоматически (порт `5433` на хосте, чтобы не конфликтовать с локальным PostgreSQL), миграции применяются при старте контейнера.
+
+**Особенности Docker-окружения:**
+
+- **Xvfb (виртуальный дисплей)** — Chrome запускается в headed-режиме через виртуальный экран (`DISPLAY=:99`), чтобы WAF не детектировал headless-браузер. Xvfb поднимается автоматически через `entrypoint.sh`.
+- **shm_size: 512mb** — увеличенный `/dev/shm` для стабильной работы Chrome (по умолчанию Docker даёт 64MB, чего недостаточно — Chrome крашится с "Target crashed").
+- **Playwright Chromium** — в Docker используется Chromium из Playwright-бандла (не системный Chrome). `BrowserFactory` автоматически находит его в `~/.cache/ms-playwright/`.
+- **`--no-sandbox`** — добавляется автоматически на Linux (Docker работает от root).
 
 Для остановки:
 
@@ -78,37 +87,40 @@ docker compose down -v       # остановить и удалить данны
 ## Архитектура
 
 ```
-src/
-├── main.py                  # CLI точка входа (автономный pipeline)
-├── web/
-│   ├── app.py               # FastAPI-приложение, API-эндпоинты
-│   └── static/
-│       └── index.html       # Веб-интерфейс (SPA)
-├── core/
-│   ├── config.py            # Pydantic Settings из .env
-│   ├── enums.py             # TaskStatus, TaskType, CheckpointStep, ErrorType
-│   └── logger.py            # Логирование: stdout + файл
-├── db/
-│   ├── models.py            # SQLAlchemy модели (5 таблиц)
-│   ├── repositories.py      # Все DB-операции
-│   └── session.py           # AsyncSession factory
-├── schemas/
-│   ├── input.py             # InputRow, ExcelReadResult
-│   ├── results.py           # FedresursResultData
-│   └── kad_result.py        # KadArbitrResultData
-├── services/
-│   ├── excel_reader.py      # Чтение и валидация Excel
-│   ├── task_service.py      # import, complete, fail, not_found, recover
-│   ├── task_executor.py     # Оркестрация: heartbeat → parse → save → complete
-│   └── worker_runner.py     # acquire → execute → reuse page loop
-├── browser/
-│   ├── factory.py           # BrowserFactory (CDP)
-│   ├── page_helpers.py      # detect_block, find_element, human_delay, screenshots
-│   └── selectors.py         # CSS-селекторы fedresurs.ru и kad.arbitr.ru
-└── parsers/
-    ├── base.py              # BaseParser (ABC)
-    ├── fedresurs.py         # FedresursParser
-    └── kad_arbitr.py        # KadArbitrParser
+├── Dockerfile               # Python 3.11 + Playwright + Xvfb
+├── entrypoint.sh            # Запуск Xvfb + uvicorn
+├── docker-compose.yml       # app + PostgreSQL 16
+├── src/
+│   ├── main.py              # CLI точка входа (автономный pipeline)
+│   ├── web/
+│   │   ├── app.py           # FastAPI-приложение, API-эндпоинты
+│   │   └── static/
+│   │       └── index.html   # Веб-интерфейс (SPA)
+│   ├── core/
+│   │   ├── config.py        # Pydantic Settings из .env
+│   │   ├── enums.py         # TaskStatus, TaskType, CheckpointStep, ErrorType
+│   │   └── logger.py        # Логирование: stdout + файл
+│   ├── db/
+│   │   ├── models.py        # SQLAlchemy модели (5 таблиц)
+│   │   ├── repositories.py  # Все DB-операции
+│   │   └── session.py       # AsyncSession factory
+│   ├── schemas/
+│   │   ├── input.py         # InputRow, ExcelReadResult
+│   │   ├── results.py       # FedresursResultData
+│   │   └── kad_result.py    # KadArbitrResultData
+│   ├── services/
+│   │   ├── excel_reader.py  # Чтение и валидация Excel
+│   │   ├── task_service.py  # import, complete, fail, not_found, recover
+│   │   ├── task_executor.py # Оркестрация: heartbeat → parse → save → complete
+│   │   └── worker_runner.py # acquire → execute → reuse page loop
+│   ├── browser/
+│   │   ├── factory.py       # BrowserFactory (CDP, авто-поиск Chrome/Chromium)
+│   │   ├── page_helpers.py  # detect_block, find_element, human_delay, screenshots
+│   │   └── selectors.py     # CSS-селекторы fedresurs.ru и kad.arbitr.ru
+│   └── parsers/
+│       ├── base.py          # BaseParser (ABC)
+│       ├── fedresurs.py     # FedresursParser
+│       └── kad_arbitr.py    # KadArbitrParser
 ```
 
 ### Два режима запуска
@@ -163,7 +175,7 @@ pending ──→ in_progress ──→ done
 | **Worker** | Берёт задачу из очереди, управляет переиспользованием вкладки |
 | **Executor** | Heartbeat + выбор парсера + сохранение результата + завершение |
 | **Parser** | Только получение данных (ничего не знает про БД и lifecycle) |
-| **BrowserFactory** | Управление Chrome (запуск, подключение, закрытие) |
+| **BrowserFactory** | Управление Chrome (авто-поиск, запуск, CDP-подключение, закрытие) |
 
 ## API
 
@@ -216,6 +228,8 @@ HEARTBEAT_INTERVAL_SECONDS=15
 2. Playwright подключается через CDP — полный контроль при чистом fingerprint
 3. Автоматический lifecycle через `BrowserFactory`
 
+**В Docker:** headless-режим (`--headless=new`) тоже детектируется WAF. Поэтому в контейнере используется **Xvfb** — виртуальный X-сервер, позволяющий Chrome работать в headed-режиме без реального дисплея. Fingerprint полностью идентичен десктопному запуску.
+
 ## Ключевые слова (GitHub Topics)
 
 ```
@@ -242,6 +256,8 @@ data-extraction, court-documents, russian-bankruptcy
 - [x] Переиспользование вкладки
 - [x] Имитация пользователя (random задержки)
 - [x] Веб-интерфейс (FastAPI + SPA)
-- [x] Docker Compose (приложение + PostgreSQL)
+- [x] Docker Compose (приложение + PostgreSQL + Xvfb)
+- [x] Docker: Xvfb для обхода headless-детекции WAF
+- [x] Docker: авто-поиск Playwright Chromium, shm_size для стабильности
 - [ ] Retry-механика
 - [ ] Proxy support
