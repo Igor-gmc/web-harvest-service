@@ -14,7 +14,11 @@ WORKER_NAME = "direct_worker"
 async def run_worker(session: AsyncSession, factory: BrowserFactory) -> bool:
     """Берёт следующую задачу и передаёт её executor'у.
 
-    Возвращает True если задача была обработана, False если очередь пуста.
+    Переиспользует вкладку между задачами:
+    - После успеха: page на главной (клик по логотипу)
+    - После «Ничего не найдено»: page на странице результатов
+
+    Возвращает True если хотя бы одна задача была обработана, False если очередь пуста.
     """
     task = await acquire_next_task(session, WORKER_NAME, settings.lock_ttl_seconds)
     if task is None:
@@ -28,5 +32,26 @@ async def run_worker(session: AsyncSession, factory: BrowserFactory) -> bool:
         task.source_value,
     )
 
-    await execute_task(session, task, factory)
+    reuse_page, on_results = await execute_task(session, task, factory)
+
+    # Цикл переиспользования вкладки
+    while reuse_page is not None:
+        task = await acquire_next_task(session, WORKER_NAME, settings.lock_ttl_seconds)
+        if task is None:
+            logger.info("No more tasks — releasing reuse page")
+            await factory.release_page(reuse_page)
+            break
+
+        logger.info(
+            "Reusing page for next task: id=%d, type=%s, source_value=%s",
+            task.id,
+            task.task_type,
+            task.source_value,
+        )
+        reuse_page, on_results = await execute_task(
+            session, task, factory,
+            reuse_page=reuse_page,
+            reuse_on_results=on_results,
+        )
+
     return True

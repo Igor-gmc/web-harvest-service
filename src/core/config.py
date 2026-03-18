@@ -36,8 +36,7 @@ class Settings(BaseSettings):
     max_concurrent_workers: int = Field(default=1)
     max_tasks_per_proxy: int = Field(default=1)
 
-    request_delay_min: int = Field(default=1)
-    request_delay_max: int = Field(default=3)
+    human_delay_max_seconds: int = Field(default=10)
 
     retry_attempts: int = Field(default=3)
     retry_base_delay: int = Field(default=2)

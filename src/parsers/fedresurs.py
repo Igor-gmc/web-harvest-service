@@ -8,6 +8,7 @@ from src.browser.page_helpers import (
     click_element,
     detect_block,
     find_element_by_candidates,
+    human_delay,
     race_selectors,
     save_debug_html,
     save_debug_screenshot,
@@ -17,6 +18,7 @@ from src.browser.selectors import (
     FEDRESURS_BANKRUPTCY_BLOCK_CANDIDATES,
     FEDRESURS_CASE_NUMBER_CANDIDATES,
     FEDRESURS_ENTITY_LINK_CANDIDATES,
+    FEDRESURS_LOGO_CANDIDATES,
     FEDRESURS_NO_RESULTS_CANDIDATES,
     FEDRESURS_PUBLICATIONS_CANDIDATES,
     FEDRESURS_RESULT_CARD_CANDIDATES,
@@ -52,6 +54,10 @@ class SearchFailedError(RuntimeError):
 class NoResultsFoundError(RuntimeError):
     """По данному ИНН ничего не найдено."""
 
+    def __init__(self, message: str, page: Page | None = None) -> None:
+        super().__init__(message)
+        self.page = page
+
 
 class NoBankruptcyDataError(RuntimeError):
     """Карточка есть, но сведений о банкротстве нет."""
@@ -64,19 +70,40 @@ class FedresursParser(BaseParser):
     Все секции карточки находятся на одной странице (no tab click needed).
     """
 
-    async def parse(self, task: ParseTask, factory: BrowserFactory) -> list[FedresursResultData]:
+    async def parse(
+        self,
+        task: ParseTask,
+        factory: BrowserFactory,
+        reuse_page: Page | None = None,
+        reuse_on_results: bool = False,
+    ) -> list[FedresursResultData]:
         inn = task.source_value
         logger.info("FedresursParser started: task_id=%d, inn=%s", task.id, inn)
 
-        page = await factory.acquire_page()
+        page = reuse_page or await factory.acquire_page()
+        self.reuse_page: Page | None = None
         try:
-            # Шаги 1–9: поиск → результаты → открытие карточки
-            await self._open_entity_card(page, task)
+            if reuse_on_results:
+                # Повторный поиск на уже открытой странице результатов
+                await self._search_on_results_page(page, task)
+            else:
+                # Шаги 1–9: поиск → результаты → открытие карточки
+                await self._open_entity_card(
+                    page, task, skip_goto=(reuse_page is not None),
+                )
 
             # Шаг 10: извлечение данных о банкротстве (секция уже на странице)
             case_number, last_date = await self._extract_bankruptcy_data(page, task)
-        finally:
+        except NoResultsFoundError:
+            # Не закрываем страницу — передаём её для переиспользования
+            raise
+        except Exception:
             await factory.release_page(page)
+            raise
+
+        # Успех — возвращаемся на главную для переиспользования вкладки
+        await self._navigate_to_main(page, task)
+        self.reuse_page = page
 
         now = datetime.now(timezone.utc)
         results = [
@@ -99,27 +126,33 @@ class FedresursParser(BaseParser):
     # Подэтап 1: главная → поиск → результаты → карточка
     # ──────────────────────────────────────────────────────────────────────
 
-    async def _open_entity_card(self, page: Page, task: ParseTask) -> None:
+    async def _open_entity_card(
+        self, page: Page, task: ParseTask, skip_goto: bool = False,
+    ) -> None:
         inn = task.source_value
 
-        # --- Шаг 1: Открываем fedresurs.ru ---
-        logger.info("Opening %s ...", FEDRESURS_URL)
-        await page.goto(FEDRESURS_URL, wait_until="networkidle", timeout=60000)
-        title = await page.title()
-        current_url = page.url
-        logger.info("Page loaded: title=%s, url=%s", title, current_url)
+        if skip_goto:
+            # Уже на главной (после клика по логотипу) — не перезагружаем
+            logger.info("Already on main page, skip_goto=True, task_id=%d", task.id)
+        else:
+            # --- Шаг 1: Открываем fedresurs.ru ---
+            logger.info("Opening %s ...", FEDRESURS_URL)
+            await page.goto(FEDRESURS_URL, wait_until="networkidle", timeout=60000)
+            title = await page.title()
+            current_url = page.url
+            logger.info("Page loaded: title=%s, url=%s", title, current_url)
 
-        # --- Шаг 2: Детекция блокировки ---
-        block_reason = await detect_block(page)
-        if block_reason is not None:
-            await save_debug_screenshot(page, "fedresurs_blocked.png")
-            await save_debug_html(page, "fedresurs_blocked.html")
-            logger.error(
-                "FedresursParser: site blocked, task_id=%d. %s", task.id, block_reason
-            )
-            raise SiteAccessBlockedError(
-                f"{block_reason} | url={current_url} | See debug/fedresurs_blocked.png"
-            )
+            # --- Шаг 2: Детекция блокировки ---
+            block_reason = await detect_block(page)
+            if block_reason is not None:
+                await save_debug_screenshot(page, "fedresurs_blocked.png")
+                await save_debug_html(page, "fedresurs_blocked.html")
+                logger.error(
+                    "FedresursParser: site blocked, task_id=%d. %s", task.id, block_reason
+                )
+                raise SiteAccessBlockedError(
+                    f"{block_reason} | url={current_url} | See debug/fedresurs_blocked.png"
+                )
 
         # --- Шаг 3: Находим поле ввода ---
         input_selector = await find_element_by_candidates(
@@ -154,44 +187,64 @@ class FedresursParser(BaseParser):
         try:
             await page.wait_for_url(lambda url: url != url_before, timeout=15000)
         except Exception:
-            await page.wait_for_timeout(3000)
+            await human_delay(page, "fallback after search")
         logger.info("After search: url=%s, task_id=%d", page.url, task.id)
 
-        # --- Шаг 7: Ждём загрузки страницы результатов ---
-        tab_selector = await find_element_by_candidates(
-            page, FEDRESURS_TAB_PANEL_CANDIDATES,
-            label="tab_panel", timeout_ms=15000,
-        )
-        if tab_selector is None:
-            await save_debug_screenshot(page, f"fedresurs_no_tabs_{task.id}.png")
-            await save_debug_html(page, f"fedresurs_no_tabs_{task.id}.html")
-            raise PageStructureChangedError(
-                f"Tab panel not found for INN {inn}. See debug/fedresurs_no_tabs_{task.id}.png"
-            )
-        logger.info("Results page loaded, task_id=%d", task.id)
-        await page.wait_for_timeout(2000)
-
-        # --- Шаг 8: Ищем карточку результата ИЛИ маркер "ничего не найдено" ---
+        # --- Шаг 7+8: Ждём загрузки результатов — карточка, "ничего не найдено" или панель вкладок ---
+        # «Ничего не найдено» может появиться БЕЗ панели вкладок, поэтому
+        # объединяем ожидание в один race.
         winner, selector = await race_selectors(
             page,
             {
                 "result_card": FEDRESURS_RESULT_CARD_CANDIDATES,
                 "no_results": FEDRESURS_NO_RESULTS_CANDIDATES,
+                "tab_panel": FEDRESURS_TAB_PANEL_CANDIDATES,
             },
-            timeout_ms=10000,
+            timeout_ms=15000,
         )
 
         if winner == "no_results":
             await save_debug_screenshot(page, f"fedresurs_no_results_{task.id}.png")
             raise NoResultsFoundError(
-                f"No results for INN {inn}. See debug/fedresurs_no_results_{task.id}.png"
+                f"No results for INN {inn}. See debug/fedresurs_no_results_{task.id}.png",
+                page=page,
             )
+
         if winner is None:
-            await save_debug_screenshot(page, f"fedresurs_empty_{task.id}.png")
-            await save_debug_html(page, f"fedresurs_empty_{task.id}.html")
+            await save_debug_screenshot(page, f"fedresurs_no_tabs_{task.id}.png")
+            await save_debug_html(page, f"fedresurs_no_tabs_{task.id}.html")
             raise PageStructureChangedError(
-                f"No cards and no 'not found' marker for INN {inn}."
+                f"No results page elements found for INN {inn}. "
+                f"See debug/fedresurs_no_tabs_{task.id}.png"
             )
+
+        if winner == "tab_panel":
+            # Панель вкладок нашлась — ждём карточку или «ничего не найдено»
+            logger.info("Results page loaded (tab_panel), task_id=%d", task.id)
+            await human_delay(page, "tab panel loaded")
+
+            winner2, selector2 = await race_selectors(
+                page,
+                {
+                    "result_card": FEDRESURS_RESULT_CARD_CANDIDATES,
+                    "no_results": FEDRESURS_NO_RESULTS_CANDIDATES,
+                },
+                timeout_ms=10000,
+            )
+
+            if winner2 == "no_results":
+                await save_debug_screenshot(page, f"fedresurs_no_results_{task.id}.png")
+                raise NoResultsFoundError(
+                    f"No results for INN {inn}. See debug/fedresurs_no_results_{task.id}.png",
+                    page=page,
+                )
+            if winner2 is None:
+                await save_debug_screenshot(page, f"fedresurs_empty_{task.id}.png")
+                await save_debug_html(page, f"fedresurs_empty_{task.id}.html")
+                raise PageStructureChangedError(
+                    f"No cards and no 'not found' marker for INN {inn}."
+                )
+            selector = selector2
 
         logger.info("Result card found: %s, task_id=%d", selector, task.id)
 
@@ -206,6 +259,7 @@ class FedresursParser(BaseParser):
                 f"Entity link not found for INN {inn}. See debug/fedresurs_no_link_{task.id}.png"
             )
 
+        await human_delay(page, "before entity link click")
         url_before_card = page.url
         await click_element(page, entity_link)
         logger.info("Entity link clicked, task_id=%d", task.id)
@@ -213,12 +267,158 @@ class FedresursParser(BaseParser):
         try:
             await page.wait_for_url(lambda url: url != url_before_card, timeout=30000)
         except Exception:
-            await page.wait_for_timeout(5000)
+            await human_delay(page, "fallback after card click")
 
         logger.info("Entity card loaded: url=%s, task_id=%d", page.url, task.id)
 
         # Даём Angular дорендерить все секции карточки
-        await page.wait_for_timeout(5000)
+        await human_delay(page, "card rendering")
+        await save_debug_screenshot(page, f"fedresurs_card_{task.id}.png")
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Возврат на главную через клик по логотипу (переиспользование вкладки)
+    # ──────────────────────────────────────────────────────────────────────
+
+    async def _navigate_to_main(self, page: Page, task: ParseTask) -> None:
+        """Кликает по логотипу для возврата на главную страницу."""
+        await human_delay(page, "before logo click")
+
+        logo_selector = await find_element_by_candidates(
+            page, FEDRESURS_LOGO_CANDIDATES,
+            label="logo", timeout_ms=5000,
+        )
+        if logo_selector is None:
+            logger.warning("Logo not found, falling back to goto, task_id=%d", task.id)
+            await page.goto(FEDRESURS_URL, wait_until="networkidle", timeout=60000)
+            return
+
+        url_before = page.url
+        await click_element(page, logo_selector)
+        logger.info("Logo clicked, task_id=%d", task.id)
+
+        try:
+            await page.wait_for_url(lambda url: url != url_before, timeout=15000)
+        except Exception:
+            await human_delay(page, "fallback after logo click")
+
+        logger.info("Back on main page: url=%s, task_id=%d", page.url, task.id)
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Подэтап 1.5: повторный поиск на уже открытой странице результатов
+    # ──────────────────────────────────────────────────────────────────────
+
+    async def _search_on_results_page(self, page: Page, task: ParseTask) -> None:
+        """Очищает поле ввода, вводит новый ИНН и ищет на странице результатов.
+
+        Вызывается когда предыдущий ИНН дал «Ничего не найдено» и страница
+        не закрывалась — переиспользуем вкладку для следующего ИНН.
+        """
+        inn = task.source_value
+        logger.info("Reusing results page for new INN: %s, task_id=%d", inn, task.id)
+        await human_delay(page, "before re-search")
+
+        # --- Находим поле ввода на странице результатов ---
+        input_selector = await find_element_by_candidates(
+            page, FEDRESURS_SEARCH_INPUT_CANDIDATES,
+            label="results_search_input", timeout_ms=10000,
+        )
+        if input_selector is None:
+            raise PageStructureChangedError(
+                f"Search input not found on results page for task_id={task.id}"
+            )
+
+        # --- Очищаем и вводим новый ИНН ---
+        await type_into(page, input_selector, inn)
+        logger.info("New INN entered on results page: %s, task_id=%d", inn, task.id)
+
+        # --- Запускаем поиск нажатием Enter ---
+        await page.press(input_selector, "Enter")
+        logger.info("Search triggered via Enter on results page, task_id=%d", task.id)
+
+        # --- Ждём обновления результатов ---
+        await human_delay(page, "after Enter re-search")
+
+        # --- Ждём результатов: карточка, "ничего не найдено" или панель вкладок ---
+        winner, selector = await race_selectors(
+            page,
+            {
+                "result_card": FEDRESURS_RESULT_CARD_CANDIDATES,
+                "no_results": FEDRESURS_NO_RESULTS_CANDIDATES,
+                "tab_panel": FEDRESURS_TAB_PANEL_CANDIDATES,
+            },
+            timeout_ms=15000,
+        )
+
+        if winner == "no_results":
+            await save_debug_screenshot(page, f"fedresurs_no_results_{task.id}.png")
+            raise NoResultsFoundError(
+                f"No results for INN {inn}. See debug/fedresurs_no_results_{task.id}.png",
+                page=page,
+            )
+
+        if winner is None:
+            await save_debug_screenshot(page, f"fedresurs_no_tabs_{task.id}.png")
+            await save_debug_html(page, f"fedresurs_no_tabs_{task.id}.html")
+            raise PageStructureChangedError(
+                f"No results page elements after re-search for INN {inn}. "
+                f"See debug/fedresurs_no_tabs_{task.id}.png"
+            )
+
+        if winner == "tab_panel":
+            logger.info("Results page reloaded after re-search, task_id=%d", task.id)
+            await human_delay(page, "tab panel loaded re-search")
+
+            winner2, selector2 = await race_selectors(
+                page,
+                {
+                    "result_card": FEDRESURS_RESULT_CARD_CANDIDATES,
+                    "no_results": FEDRESURS_NO_RESULTS_CANDIDATES,
+                },
+                timeout_ms=10000,
+            )
+
+            if winner2 == "no_results":
+                await save_debug_screenshot(page, f"fedresurs_no_results_{task.id}.png")
+                raise NoResultsFoundError(
+                    f"No results for INN {inn}. See debug/fedresurs_no_results_{task.id}.png",
+                    page=page,
+                )
+            if winner2 is None:
+                await save_debug_screenshot(page, f"fedresurs_empty_{task.id}.png")
+                await save_debug_html(page, f"fedresurs_empty_{task.id}.html")
+                raise PageStructureChangedError(
+                    f"No cards and no 'not found' marker for INN {inn} after re-search."
+                )
+            selector = selector2
+
+        logger.info("Result card found after re-search: %s, task_id=%d", selector, task.id)
+
+        # --- Клик "Вся информация" ---
+        entity_link = await find_element_by_candidates(
+            page, FEDRESURS_ENTITY_LINK_CANDIDATES,
+            label="entity_link", timeout_ms=5000,
+        )
+        if entity_link is None:
+            await save_debug_screenshot(page, f"fedresurs_no_link_{task.id}.png")
+            raise PageStructureChangedError(
+                f"Entity link not found for INN {inn}. "
+                f"See debug/fedresurs_no_link_{task.id}.png"
+            )
+
+        await human_delay(page, "before entity link click re-search")
+        url_before_card = page.url
+        await click_element(page, entity_link)
+        logger.info("Entity link clicked (re-search), task_id=%d", task.id)
+
+        try:
+            await page.wait_for_url(lambda url: url != url_before_card, timeout=30000)
+        except Exception:
+            await human_delay(page, "fallback after card click re-search")
+
+        logger.info("Entity card loaded (re-search): url=%s, task_id=%d", page.url, task.id)
+
+        # Даём Angular дорендерить все секции карточки
+        await human_delay(page, "card rendering re-search")
         await save_debug_screenshot(page, f"fedresurs_card_{task.id}.png")
 
     # ──────────────────────────────────────────────────────────────────────

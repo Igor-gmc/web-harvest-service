@@ -4,6 +4,13 @@
 хранится список кандидатов — от самого надёжного к менее надёжному.
 """
 
+# Логотип (для возврата на главную)
+FEDRESURS_LOGO_CANDIDATES: list[str] = [
+    'span.logo.logo__img-wrapper',
+    '.logo__img-wrapper',
+    'a.logo',
+]
+
 # Поле ввода ИНН / наименования
 FEDRESURS_SEARCH_INPUT_CANDIDATES: list[str] = [
     'input[formcontrolname="searchString"]',
@@ -35,6 +42,12 @@ FEDRESURS_ENTITY_LINK_CANDIDATES: list[str] = [
     'a.info.info_position',
     'el-info-link a',
     'a.info_position',
+]
+
+# Кнопка поиска (лупа) на странице результатов — для повторного поиска
+FEDRESURS_RESULTS_SEARCH_BUTTON_CANDIDATES: list[str] = [
+    'div.itm-lupa',
+    '.itm-lupa',
 ]
 
 # Маркер "Ничего не найдено" — ТОЛЬКО в активной вкладке

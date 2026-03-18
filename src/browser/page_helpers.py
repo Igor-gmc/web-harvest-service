@@ -1,10 +1,12 @@
 """Вспомогательные функции для работы со страницей Playwright."""
 
 import asyncio
+import random
 from pathlib import Path
 
 from playwright.async_api import Page
 
+from src.core.config import settings
 from src.core.logger import get_logger
 
 logger = get_logger(__name__)
@@ -19,7 +21,7 @@ async def detect_block(page: Page) -> str | None:
     Возвращает описание блокировки или None, если страница нормальная.
     """
     # Даём Angular/SPA время отрендерить title
-    await page.wait_for_timeout(2000)
+    await human_delay(page, "block detection")
 
     title = (await page.title()).lower()
     for marker in _BLOCK_MARKERS:
@@ -71,41 +73,42 @@ async def race_selectors(
 ) -> tuple[str, str] | tuple[None, None]:
     """Ждёт первый найденный селектор из нескольких групп одновременно.
 
+    Все селекторы из всех групп проверяются параллельно — побеждает тот,
+    который найдётся первым. Это исключает задержки из-за последовательного
+    перебора кандидатов внутри группы.
+
     groups: {"result_card": [...selectors...], "no_results": [...selectors...]}
     Возвращает (group_name, selector) для первого найденного, или (None, None).
     """
-    async def _check_group(group_name: str, candidates: list[str]) -> tuple[str, str]:
-        for selector in candidates:
-            try:
-                await page.wait_for_selector(selector, timeout=timeout_ms, state="attached")
-                logger.info("Race won by '%s' with selector: %s", group_name, selector)
-                return group_name, selector
-            except Exception:
-                pass
-        return None, None
-
-    tasks = [_check_group(name, candidates) for name, candidates in groups.items()]
-    done, pending = await asyncio.wait(
-        [asyncio.create_task(t) for t in tasks],
-        return_when=asyncio.FIRST_COMPLETED,
-    )
-
-    # Отменяем оставшиеся
-    for task in pending:
-        task.cancel()
-
-    # Берём первый завершённый с результатом
-    for task in done:
-        group_name, selector = task.result()
-        if group_name is not None:
-            return group_name, selector
-
-    # Дожидаемся остальных (вдруг кто-то успел)
-    for task in pending:
+    async def _check_one(group_name: str, selector: str) -> tuple[str, str]:
         try:
-            await task
-        except (asyncio.CancelledError, Exception):
-            pass
+            await page.wait_for_selector(selector, timeout=timeout_ms, state="attached")
+            return group_name, selector
+        except Exception:
+            return None, None
+
+    # Все селекторы из всех групп запускаем параллельно
+    all_tasks = [
+        asyncio.create_task(_check_one(name, sel))
+        for name, candidates in groups.items()
+        for sel in candidates
+    ]
+
+    # Ждём по одному, пока кто-то не найдёт совпадение
+    while all_tasks:
+        done, all_tasks_set = await asyncio.wait(
+            all_tasks, return_when=asyncio.FIRST_COMPLETED,
+        )
+        all_tasks = list(all_tasks_set)
+
+        for task in done:
+            group_name, selector = task.result()
+            if group_name is not None:
+                logger.info("Race won by '%s' with selector: %s", group_name, selector)
+                # Отменяем оставшиеся
+                for t in all_tasks:
+                    t.cancel()
+                return group_name, selector
 
     logger.warning("Race: no selector matched in any group")
     return None, None
@@ -122,6 +125,14 @@ async def click_element(page: Page, selector: str) -> None:
     """Кликает по элементу."""
     await page.click(selector)
     logger.info("Clicked: %s", selector)
+
+
+async def human_delay(page: Page, label: str = "") -> None:
+    """Случайная задержка от 1 до human_delay_max_seconds для имитации пользователя."""
+    max_sec = settings.human_delay_max_seconds
+    delay = random.uniform(1, max(2, max_sec))
+    logger.info("Human delay: %.1fs%s", delay, f" ({label})" if label else "")
+    await page.wait_for_timeout(int(delay * 1000))
 
 
 DEBUG_DIR = Path(__file__).resolve().parent.parent.parent / "debug"
