@@ -1,5 +1,4 @@
 import asyncio
-import sys
 
 from sqlalchemy import text
 
@@ -7,8 +6,9 @@ from src.core.config import settings
 from src.core.logger import get_logger, setup_logger
 from src.db.session import async_session
 
-if sys.platform == "win32":
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+# Playwright требует ProactorEventLoop (default на Windows) для запуска subprocess.
+# asyncpg совместим с ProactorEventLoop начиная с Python 3.11.
+# Поэтому WindowsSelectorEventLoopPolicy здесь не нужна.
 
 
 async def check_db() -> None:
@@ -46,18 +46,29 @@ async def run_recovery() -> None:
         logger.info("Recovery: no stale tasks")
 
 
-async def run_next_task() -> None:
+async def run_all_tasks() -> None:
+    from src.browser.factory import BrowserFactory
     from src.services.worker_service import run_worker
 
-    async with async_session() as session:
-        await run_worker(session)
+    logger = get_logger(__name__)
+
+    async with BrowserFactory() as factory:
+        logger.info("Browser ready, processing tasks...")
+        processed = 0
+        while True:
+            async with async_session() as session:
+                task_done = await run_worker(session, factory)
+            if not task_done:
+                break
+            processed += 1
+        logger.info("All tasks processed: total=%d", processed)
 
 
 async def startup() -> None:
     await check_db()
     await run_import()
     await run_recovery()
-    await run_next_task()
+    await run_all_tasks()
 
 
 def main() -> None:

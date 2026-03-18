@@ -90,6 +90,24 @@ async def complete_task(
     logger.info("Task done: id=%d, source_value=%s", task.id, task.source_value)
 
 
+async def not_found_task(
+    session: AsyncSession,
+    task: ParseTask,
+    message: str = "No results found for this INN",
+) -> None:
+    """Переводит задачу в not_found — ИНН обработан, но данных нет."""
+    now = datetime.now(timezone.utc)
+    task.status = TaskStatus.not_found
+    task.checkpoint_step = CheckpointStep.done
+    task.finished_at = now
+    task.locked_by = None
+    task.lock_expires_at = None
+
+    await create_task_event(session, task.id, "task_not_found", message)
+    await session.commit()
+    logger.info("Task not_found: id=%d, source_value=%s", task.id, task.source_value)
+
+
 async def fail_task(
     session: AsyncSession,
     task: ParseTask,

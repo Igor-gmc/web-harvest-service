@@ -2,11 +2,12 @@ import asyncio
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.browser.factory import BrowserFactory
 from src.core.config import settings
 from src.core.logger import get_logger
 from src.db.models import ParseTask
 from src.db.repositories import refresh_heartbeat, save_fedresurs_result
-from src.services.task_service import complete_task, fail_task
+from src.services.task_service import complete_task, fail_task, not_found_task
 
 logger = get_logger(__name__)
 
@@ -14,12 +15,10 @@ HEARTBEAT_STEPS = 3
 HEARTBEAT_STEP_SECONDS = 5
 
 
-async def execute_task(session: AsyncSession, task: ParseTask) -> None:
-    """Выполняет задачу: выбирает парсер, держит heartbeat, сохраняет результаты, завершает.
-
-    Executor отвечает за lifecycle исполнения.
-    Парсер отвечает только за получение данных.
-    """
+async def execute_task(
+    session: AsyncSession, task: ParseTask, factory: BrowserFactory,
+) -> None:
+    """Выполняет задачу: выбирает парсер, держит heartbeat, сохраняет результаты, завершает."""
     logger.info("TaskExecutor started: id=%d, type=%s", task.id, task.task_type)
 
     if task.task_type == "fedresurs":
@@ -41,7 +40,18 @@ async def execute_task(session: AsyncSession, task: ParseTask) -> None:
 
     await heartbeat_loop()
 
-    results = await parser.parse(task)
+    try:
+        results = await parser.parse(task, factory)
+    except Exception as exc:
+        from src.parsers.fedresurs import NoBankruptcyDataError, NoResultsFoundError
+
+        if isinstance(exc, (NoResultsFoundError, NoBankruptcyDataError)):
+            await not_found_task(session, task, str(exc))
+            return
+
+        await fail_task(session, task, f"{type(exc).__name__}: {exc}")
+        logger.error("TaskExecutor failed: id=%d, error=%s", task.id, exc)
+        return
 
     for result in results:
         await save_fedresurs_result(session, result)

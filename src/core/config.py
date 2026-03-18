@@ -30,6 +30,8 @@ class Settings(BaseSettings):
 
     playwright_headless: bool = Field(default=True)
     browser_timeout_ms: int = Field(default=30000)
+    cdp_port: int = Field(default=9222)
+    max_browser_pages: int = Field(default=3)
 
     max_concurrent_workers: int = Field(default=1)
     max_tasks_per_proxy: int = Field(default=1)

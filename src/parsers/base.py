@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 
+from src.browser.factory import BrowserFactory
 from src.db.models import ParseTask
 from src.schemas.results import FedresursResultData
 
@@ -12,9 +13,6 @@ class BaseParser(ABC):
     """
 
     @abstractmethod
-    async def parse(self, task: ParseTask) -> list[FedresursResultData]:
-        """Выполняет парсинг и возвращает список результатов.
-
-        Не делает commit и не обновляет статус задачи.
-        """
+    async def parse(self, task: ParseTask, factory: BrowserFactory) -> list[FedresursResultData]:
+        """Выполняет парсинг и возвращает список результатов."""
         ...
