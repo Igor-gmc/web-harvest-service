@@ -1,0 +1,703 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Парсер банкротств</title>
+<style>
+  :root {
+    --bg: #f0f2f5;
+    --surface: #ffffff;
+    --surface-hover: #f5f6f8;
+    --border: #d9dce3;
+    --text: #1a1c2a;
+    --text-muted: #6b7085;
+    --accent: #4a5aab;
+    --accent-hover: #5b6abf;
+    --accent-dim: rgba(74, 90, 171, 0.1);
+    --green: #2e9e7a;
+    --green-dim: rgba(46, 158, 122, 0.1);
+    --red: #d04455;
+    --red-dim: rgba(208, 68, 85, 0.1);
+    --yellow: #c5a04b;
+    --yellow-dim: rgba(197, 160, 75, 0.1);
+    --radius: 8px;
+    --font: 'Segoe UI', -apple-system, sans-serif;
+    --mono: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: var(--font);
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+  }
+
+  /* === Header === */
+  .header {
+    padding: 20px 32px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .header h1 {
+    font-size: 18px;
+    font-weight: 600;
+    letter-spacing: -0.3px;
+  }
+
+  .header .dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--text-muted);
+    transition: background 0.3s;
+  }
+
+  .header .dot.active { background: var(--green); }
+
+  /* === Main layout === */
+  .container {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 24px 32px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+
+  /* === Cards === */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px 24px;
+  }
+
+  .card-title {
+    font-size: 13px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: var(--text-muted);
+    margin-bottom: 16px;
+  }
+
+  /* === Upload zone === */
+  .upload-zone {
+    border: 2px dashed var(--border);
+    border-radius: var(--radius);
+    padding: 32px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.2s, background 0.2s;
+    position: relative;
+  }
+
+  .upload-zone:hover,
+  .upload-zone.dragover {
+    border-color: var(--accent);
+    background: var(--accent-dim);
+  }
+
+  .upload-zone input[type="file"] {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    cursor: pointer;
+  }
+
+  .upload-icon {
+    font-size: 32px;
+    margin-bottom: 8px;
+    color: var(--text-muted);
+  }
+
+  .upload-text {
+    font-size: 14px;
+    color: var(--text-muted);
+  }
+
+  .upload-text strong {
+    color: var(--accent);
+  }
+
+  .file-name {
+    margin-top: 10px;
+    font-size: 13px;
+    color: var(--green);
+    font-family: var(--mono);
+    display: none;
+  }
+
+  .file-name.show { display: block; }
+
+  /* === Controls === */
+  .controls {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+
+  .btn {
+    font-family: var(--font);
+    font-size: 13px;
+    font-weight: 600;
+    padding: 10px 20px;
+    border: 1px solid transparent;
+    border-radius: var(--radius);
+    cursor: pointer;
+    transition: all 0.15s;
+    outline: none;
+    letter-spacing: 0.3px;
+  }
+
+  .btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+  }
+
+  .btn-primary {
+    background: var(--accent);
+    color: #fff;
+  }
+  .btn-primary:hover:not(:disabled) {
+    background: var(--accent-hover);
+  }
+
+  .btn-danger {
+    background: var(--red-dim);
+    color: var(--red);
+    border-color: var(--red);
+  }
+  .btn-danger:hover:not(:disabled) {
+    background: var(--red);
+    color: #fff;
+  }
+
+  .btn-success {
+    background: var(--green-dim);
+    color: var(--green);
+    border-color: var(--green);
+  }
+  .btn-success:hover:not(:disabled) {
+    background: var(--green);
+    color: var(--bg);
+  }
+
+  .btn-outline {
+    background: transparent;
+    color: var(--accent);
+    border-color: var(--border);
+  }
+  .btn-outline:hover:not(:disabled) {
+    background: var(--accent-dim);
+    border-color: var(--accent);
+  }
+
+  /* === Status bar === */
+  .status-bar {
+    display: flex;
+    gap: 16px;
+    margin-left: auto;
+    font-size: 13px;
+    font-family: var(--mono);
+  }
+
+  .stat {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-muted);
+  }
+
+  .stat .num { color: var(--text); font-weight: 600; }
+  .stat.done .num { color: var(--green); }
+  .stat.fail .num { color: var(--red); }
+  .stat.progress .num { color: var(--yellow); }
+
+  /* === Progress === */
+  .progress-wrap {
+    height: 3px;
+    background: var(--border);
+    border-radius: 2px;
+    overflow: hidden;
+    display: none;
+  }
+
+  .progress-wrap.show { display: block; }
+
+  .progress-bar {
+    height: 100%;
+    background: var(--accent);
+    width: 0%;
+    transition: width 0.5s ease;
+  }
+
+  /* === Table === */
+  .table-wrap {
+    overflow-x: auto;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+
+  thead th {
+    text-align: left;
+    padding: 10px 14px;
+    font-weight: 600;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-muted);
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+
+  tbody td {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    font-family: var(--mono);
+    font-size: 12.5px;
+    vertical-align: top;
+  }
+
+  tbody tr:hover {
+    background: var(--surface-hover);
+  }
+
+  tbody td a {
+    color: var(--accent);
+    text-decoration: none;
+  }
+
+  tbody td a:hover {
+    text-decoration: underline;
+  }
+
+  .empty-state {
+    text-align: center;
+    padding: 48px 20px;
+    color: var(--text-muted);
+    font-size: 14px;
+  }
+
+  /* === Toast === */
+  .toast-container {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    z-index: 9999;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .toast {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px 40px 14px 16px;
+    font-size: 13px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+    animation: slideIn 0.25s ease;
+    position: relative;
+    max-width: 360px;
+  }
+
+  .toast.success { border-left: 3px solid var(--green); }
+  .toast.error { border-left: 3px solid var(--red); }
+  .toast.info { border-left: 3px solid var(--accent); }
+
+  .toast-close {
+    position: absolute;
+    top: 8px;
+    right: 10px;
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 16px;
+    line-height: 1;
+    padding: 4px;
+  }
+
+  .toast-close:hover { color: var(--text); }
+
+  @keyframes slideIn {
+    from { transform: translateX(100%); opacity: 0; }
+    to { transform: translateX(0); opacity: 1; }
+  }
+
+  @keyframes slideOut {
+    from { transform: translateX(0); opacity: 1; }
+    to { transform: translateX(100%); opacity: 0; }
+  }
+
+  /* === Responsive === */
+  @media (max-width: 768px) {
+    .container { padding: 16px; }
+    .header { padding: 16px; }
+    .controls { flex-direction: column; align-items: stretch; }
+    .status-bar { margin-left: 0; flex-wrap: wrap; }
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="dot" id="statusDot"></div>
+  <h1>Парсер банкротств</h1>
+</div>
+
+<div class="container">
+  <!-- Upload -->
+  <div class="card">
+    <div class="card-title">Загрузка файла</div>
+    <div class="upload-zone" id="uploadZone">
+      <input type="file" accept=".xlsx" id="fileInput">
+      <div class="upload-icon">&#8679;</div>
+      <div class="upload-text">
+        Перетащите <strong>.xlsx</strong> файл сюда или нажмите для выбора
+      </div>
+      <div class="file-name" id="fileName"></div>
+    </div>
+  </div>
+
+  <!-- Controls -->
+  <div class="card">
+    <div class="card-title">Управление</div>
+    <div class="controls">
+      <button class="btn btn-primary" id="btnStart">Запустить парсинг</button>
+      <button class="btn btn-danger" id="btnStop" disabled>Остановить</button>
+      <button class="btn btn-outline" id="btnResume" disabled>Продолжить</button>
+      <button class="btn btn-success" id="btnDownload" disabled>Скачать результаты (.xlsx)</button>
+      <div class="status-bar" id="statusBar">
+        <div class="stat progress"><span class="num" id="statPending">0</span> в очереди</div>
+        <div class="stat progress"><span class="num" id="statProgress">0</span> в работе</div>
+        <div class="stat done"><span class="num" id="statDone">0</span> готово</div>
+        <div class="stat fail"><span class="num" id="statFailed">0</span> ошибок</div>
+      </div>
+    </div>
+    <div class="progress-wrap" id="progressWrap" style="margin-top: 14px;">
+      <div class="progress-bar" id="progressBar"></div>
+    </div>
+  </div>
+
+  <!-- Results table -->
+  <div class="card">
+    <div class="card-title">Результаты</div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>ИНН</th>
+            <th>Номер дела</th>
+            <th>Название документа</th>
+            <th>Ссылка на документ</th>
+          </tr>
+        </thead>
+        <tbody id="resultsBody">
+        </tbody>
+      </table>
+      <div class="empty-state" id="emptyState">
+        Загрузите .xlsx файл и запустите парсинг для отображения результатов
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="toast-container" id="toastContainer"></div>
+
+<script>
+(function() {
+  // DOM refs
+  const fileInput = document.getElementById('fileInput');
+  const uploadZone = document.getElementById('uploadZone');
+  const fileName = document.getElementById('fileName');
+  const btnStart = document.getElementById('btnStart');
+  const btnStop = document.getElementById('btnStop');
+  const btnResume = document.getElementById('btnResume');
+  const btnDownload = document.getElementById('btnDownload');
+  const statusDot = document.getElementById('statusDot');
+  const progressWrap = document.getElementById('progressWrap');
+  const progressBar = document.getElementById('progressBar');
+  const resultsBody = document.getElementById('resultsBody');
+  const emptyState = document.getElementById('emptyState');
+  const statPending = document.getElementById('statPending');
+  const statProgress = document.getElementById('statProgress');
+  const statDone = document.getElementById('statDone');
+  const statFailed = document.getElementById('statFailed');
+
+  let fileUploaded = false;
+  let isRunning = false;
+  let wasStopped = false;
+  let pollTimer = null;
+
+  // --- Drag & drop ---
+  uploadZone.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    uploadZone.classList.add('dragover');
+  });
+
+  uploadZone.addEventListener('dragleave', () => {
+    uploadZone.classList.remove('dragover');
+  });
+
+  uploadZone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    uploadZone.classList.remove('dragover');
+    const files = e.dataTransfer.files;
+    if (files.length > 0) {
+      handleFile(files[0]);
+    }
+  });
+
+  fileInput.addEventListener('change', () => {
+    if (fileInput.files.length > 0) {
+      handleFile(fileInput.files[0]);
+    }
+  });
+
+  async function handleFile(file) {
+    if (!file.name.endsWith('.xlsx')) {
+      showToast('Выберите файл .xlsx', 'error');
+      return;
+    }
+
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+      const resp = await fetch('/api/upload', { method: 'POST', body: formData });
+      if (!resp.ok) {
+        const data = await resp.json();
+        throw new Error(data.detail || 'Upload failed');
+      }
+      fileName.textContent = file.name;
+      fileName.classList.add('show');
+      fileUploaded = true;
+      updateButtons();
+      showToast('Файл загружен: ' + file.name, 'success');
+    } catch (err) {
+      showToast(err.message, 'error');
+    }
+  }
+
+  // --- Buttons ---
+  btnStart.addEventListener('click', async () => {
+    try {
+      const resp = await fetch('/api/start', { method: 'POST' });
+      if (!resp.ok) {
+        const data = await resp.json();
+        throw new Error(data.detail || 'Failed to start');
+      }
+      isRunning = true;
+      wasStopped = false;
+      updateButtons();
+      startPolling();
+      showToast('Парсинг запущен', 'info');
+    } catch (err) {
+      showToast(err.message, 'error');
+    }
+  });
+
+  btnStop.addEventListener('click', async () => {
+    try {
+      const resp = await fetch('/api/stop', { method: 'POST' });
+      if (!resp.ok) {
+        const data = await resp.json();
+        throw new Error(data.detail || 'Failed to stop');
+      }
+      showToast('Останавливаем...', 'info');
+    } catch (err) {
+      showToast(err.message, 'error');
+    }
+  });
+
+  btnResume.addEventListener('click', async () => {
+    try {
+      const resp = await fetch('/api/resume', { method: 'POST' });
+      if (!resp.ok) {
+        const data = await resp.json();
+        throw new Error(data.detail || 'Failed to resume');
+      }
+      isRunning = true;
+      wasStopped = false;
+      updateButtons();
+      startPolling();
+      showToast('Парсинг возобновлён', 'info');
+    } catch (err) {
+      showToast(err.message, 'error');
+    }
+  });
+
+  btnDownload.addEventListener('click', () => {
+    window.location.href = '/api/results/download';
+  });
+
+  function updateButtons() {
+    btnStart.disabled = isRunning || !fileUploaded;
+    btnStop.disabled = !isRunning;
+    btnResume.disabled = isRunning || !wasStopped;
+    if (isRunning) btnDownload.disabled = true;
+    statusDot.classList.toggle('active', isRunning);
+    progressWrap.classList.toggle('show', isRunning);
+  }
+
+  // --- Polling ---
+  function startPolling() {
+    stopPolling();
+    pollStatus();
+    pollResults();
+    pollTimer = setInterval(() => {
+      pollStatus();
+      pollResults();
+    }, 2000);
+  }
+
+  function stopPolling() {
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+  }
+
+  async function pollStatus() {
+    try {
+      const resp = await fetch('/api/status');
+      const data = await resp.json();
+
+      statPending.textContent = data.pending;
+      statProgress.textContent = data.in_progress;
+      statDone.textContent = data.done;
+      statFailed.textContent = data.failed;
+
+      const total = data.total || 1;
+      const completed = data.done + data.not_found + data.failed;
+      const pct = Math.round((completed / total) * 100);
+      progressBar.style.width = pct + '%';
+
+      // Detect completion or stop
+      if (isRunning && !data.running) {
+        isRunning = false;
+        const wasAllDone = data.pending === 0 && data.in_progress === 0;
+        if (wasAllDone) {
+          showToast('Парсинг завершён', 'success', 5000);
+          wasStopped = false;
+        } else {
+          wasStopped = true;
+          showToast('Парсинг остановлен', 'info');
+        }
+        btnDownload.disabled = false;
+        updateButtons();
+        stopPolling();
+        // Final results fetch
+        pollResults();
+      }
+    } catch (err) {
+      // ignore poll errors
+    }
+  }
+
+  async function pollResults() {
+    try {
+      const resp = await fetch('/api/results');
+      const data = await resp.json();
+      renderResults(data.results);
+    } catch (err) {
+      // ignore
+    }
+  }
+
+  function renderResults(results) {
+    if (!results || results.length === 0) {
+      resultsBody.innerHTML = '';
+      emptyState.style.display = 'block';
+      return;
+    }
+
+    emptyState.style.display = 'none';
+    resultsBody.innerHTML = results.map((r, i) => `
+      <tr>
+        <td>${i + 1}</td>
+        <td>${esc(r.inn)}</td>
+        <td>${esc(r.case_number)}</td>
+        <td>${esc(r.document_name || '\u2014')}</td>
+        <td>${r.document_url
+              ? '<a href="' + esc(r.document_url) + '" target="_blank" rel="noopener">Открыть</a>'
+              : '\u2014'}</td>
+      </tr>
+    `).join('');
+  }
+
+  function esc(str) {
+    const d = document.createElement('div');
+    d.textContent = str;
+    return d.innerHTML;
+  }
+
+  // --- Toast ---
+  function showToast(msg, type = 'info', duration = 5000) {
+    const container = document.getElementById('toastContainer');
+    const toast = document.createElement('div');
+    toast.className = 'toast ' + type;
+    toast.innerHTML = `
+      ${esc(msg)}
+      <button class="toast-close">&times;</button>
+    `;
+    container.appendChild(toast);
+
+    const close = () => {
+      toast.style.animation = 'slideOut 0.25s ease forwards';
+      setTimeout(() => toast.remove(), 250);
+    };
+
+    toast.querySelector('.toast-close').addEventListener('click', close);
+    setTimeout(close, duration);
+  }
+
+  // --- Init: check current state ---
+  async function init() {
+    try {
+      const resp = await fetch('/api/status');
+      const data = await resp.json();
+
+      if (data.running) {
+        isRunning = true;
+        fileUploaded = true;
+        updateButtons();
+        startPolling();
+      } else if (data.total > 0) {
+        fileUploaded = true;
+        const completed = data.done + data.not_found + data.failed;
+        if (completed === data.total && data.total > 0) {
+          btnDownload.disabled = false;
+        }
+      }
+
+      statPending.textContent = data.pending;
+      statProgress.textContent = data.in_progress;
+      statDone.textContent = data.done;
+      statFailed.textContent = data.failed;
+
+      pollResults();
+    } catch (err) {
+      // server not ready
+    }
+  }
+
+  init();
+})();
+</script>
+
+</body>
+</html>

@@ -1,0 +1,14 @@
+__pycache__
+*.pyc
+.env
+.git
+.gitignore
+.claude
+debug/
+logs/
+output/
+*.md
+repo/
+tests/
+.venv/
+venv/

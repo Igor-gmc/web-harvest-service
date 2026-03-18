@@ -42,6 +42,11 @@ async def run_stage_worker(
     on_results = False
 
     while True:
+        # Проверяем stop_event перед взятием новой задачи
+        if stop_event is not None and stop_event.is_set() and not poll:
+            logger.info("[%s] Stop requested, finishing...", worker_name)
+            break
+
         async with async_session() as session:
             task = await acquire_next_task(
                 session, worker_name, settings.lock_ttl_seconds, task_type=task_type,
