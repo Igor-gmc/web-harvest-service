@@ -8,7 +8,7 @@ from src.core.config import settings
 from src.core.enums import CheckpointStep, ErrorType
 from src.core.logger import get_logger
 from src.db.models import ParseTask
-from src.db.repositories import refresh_heartbeat, save_fedresurs_result
+from src.db.repositories import refresh_heartbeat, save_fedresurs_result, save_kad_arbitr_result
 from src.services.task_service import complete_task, fail_task, not_found_task, update_checkpoint
 
 logger = get_logger(__name__)
@@ -36,6 +36,9 @@ async def execute_task(
     if task.task_type == "fedresurs":
         from src.parsers.fedresurs import FedresursParser
         parser = FedresursParser()
+    elif task.task_type == "kad_arbitr":
+        from src.parsers.kad_arbitr import KadArbitrParser
+        parser = KadArbitrParser()
     else:
         await fail_task(session, task, f"Unknown task_type: {task.task_type}")
         logger.error("TaskExecutor: unknown task_type=%s, id=%d", task.task_type, task.id)
@@ -65,30 +68,59 @@ async def execute_task(
             checkpoint=_checkpoint,
         )
     except Exception as exc:
-        from src.parsers.fedresurs import (
-            NoBankruptcyDataError,
-            NoResultsFoundError,
-            SiteAccessBlockedError,
-        )
+        if task.task_type == "fedresurs":
+            from src.parsers.fedresurs import (
+                NoBankruptcyDataError,
+                NoResultsFoundError as FedNoResults,
+                SiteAccessBlockedError as FedBlocked,
+            )
 
-        if isinstance(exc, NoResultsFoundError):
-            await not_found_task(session, task, str(exc))
-            return exc.page, True
+            if isinstance(exc, FedNoResults):
+                await not_found_task(session, task, str(exc))
+                return exc.page, True
 
-        if isinstance(exc, NoBankruptcyDataError):
-            await not_found_task(session, task, str(exc))
-            return None, False
+            if isinstance(exc, NoBankruptcyDataError):
+                await not_found_task(session, task, str(exc))
+                return None, False
 
-        error_type = ErrorType.unknown
-        if isinstance(exc, SiteAccessBlockedError):
-            error_type = ErrorType.temporary
+            error_type = ErrorType.unknown
+            if isinstance(exc, FedBlocked):
+                error_type = ErrorType.temporary
 
-        await fail_task(session, task, f"{type(exc).__name__}: {exc}", error_type)
+            await fail_task(session, task, f"{type(exc).__name__}: {exc}", error_type)
+
+        elif task.task_type == "kad_arbitr":
+            from src.parsers.kad_arbitr import (
+                NoDocumentsFoundError,
+                NoResultsFoundError as KadNoResults,
+                SiteAccessBlockedError as KadBlocked,
+            )
+
+            if isinstance(exc, KadNoResults):
+                await not_found_task(session, task, str(exc))
+                return None, False
+
+            if isinstance(exc, NoDocumentsFoundError):
+                await not_found_task(session, task, str(exc))
+                return None, False
+
+            error_type = ErrorType.unknown
+            if isinstance(exc, KadBlocked):
+                error_type = ErrorType.temporary
+
+            await fail_task(session, task, f"{type(exc).__name__}: {exc}", error_type)
+        else:
+            await fail_task(session, task, f"{type(exc).__name__}: {exc}")
+
         logger.error("TaskExecutor failed: id=%d, error=%s", task.id, exc)
         return None, False
 
-    for result in results:
-        await save_fedresurs_result(session, result)
+    if task.task_type == "fedresurs":
+        for result in results:
+            await save_fedresurs_result(session, result)
+    elif task.task_type == "kad_arbitr":
+        for result in results:
+            await save_kad_arbitr_result(session, result)
 
     logger.info("TaskExecutor finished: id=%d, results_saved=%d", task.id, len(results))
     await complete_task(session, task)

@@ -24,9 +24,24 @@ async def run_import() -> None:
         import_result = await import_tasks(session, read_result.valid)
     logger = get_logger(__name__)
     logger.info(
-        "Tasks in DB: created=%d, skipped=%d",
+        "Tasks in DB: created=%d, reset=%d, skipped=%d",
         import_result.created,
+        import_result.reset,
         import_result.skipped,
+    )
+
+
+async def run_kad_import() -> None:
+    from src.services.task_service import import_kad_arbitr_tasks
+
+    logger = get_logger(__name__)
+    async with async_session() as session:
+        result = await import_kad_arbitr_tasks(session)
+    logger.info(
+        "KadArbitr tasks from DB: created=%d, reset=%d, skipped=%d",
+        result.created,
+        result.reset,
+        result.skipped,
     )
 
 
@@ -56,7 +71,11 @@ async def run_worker_batch() -> None:
 async def startup() -> None:
     await check_db()
     await run_import()
+    await run_kad_import()
     await run_recovery()
+    await run_worker_batch()
+    # Второй проход: после fedresurs появились case_number → создаём kad_arbitr задачи
+    await run_kad_import()
     await run_worker_batch()
 
 

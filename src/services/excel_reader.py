@@ -11,7 +11,7 @@ logger = get_logger(__name__)
 def read_identifiers() -> ExcelReadResult:
     """Читает identifiers.xlsx, нормализует и валидирует ИНН.
 
-    Строка 1 считается заголовком и пропускается.
+    Таблица без заголовков — читаются все строки.
     Плохие строки логируются и пропускаются — не валят весь импорт.
 
     Returns:
@@ -26,7 +26,7 @@ def read_identifiers() -> ExcelReadResult:
     result = ExcelReadResult()
     seen: set[str] = set()
 
-    for row_idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
+    for row_idx, row in enumerate(ws.iter_rows(min_row=1, values_only=True), start=1):
         raw = row[0] if row else None
         result.total_rows += 1
 

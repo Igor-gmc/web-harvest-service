@@ -24,12 +24,24 @@ async def run_batch(factory: BrowserFactory, worker_name: str = "direct_worker")
     processed = 0
     reuse_page = None
     on_results = False
+    prev_task_type: str | None = None
 
     while True:
         async with async_session() as session:
             task = await acquire_next_task(session, worker_name, settings.lock_ttl_seconds)
             if task is None:
                 break
+
+            # При смене task_type — сбросить page (разные сайты)
+            if prev_task_type and task.task_type != prev_task_type and reuse_page is not None:
+                logger.info(
+                    "Task type changed: %s -> %s, releasing page",
+                    prev_task_type, task.task_type,
+                )
+                await factory.release_page(reuse_page)
+                reuse_page = None
+                on_results = False
+            prev_task_type = task.task_type
 
             logger.info(
                 "Task acquired: id=%d, type=%s, source_value=%s",

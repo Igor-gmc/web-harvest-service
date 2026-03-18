@@ -6,39 +6,128 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.core.enums import CheckpointStep, ErrorType, TaskStatus, TaskType
 from src.core.logger import get_logger
 from src.db.models import ParseTask
-from src.db.repositories import create_task, create_task_event, get_stale_tasks, task_exists
+from src.db.repositories import (
+    create_task,
+    create_task_event,
+    delete_all_tasks_by_type,
+    delete_task_results,
+    get_all_source_values,
+    get_case_numbers_for_kad_import,
+    get_stale_tasks,
+    get_task,
+)
 from src.schemas.input import InputRow
 
 logger = get_logger(__name__)
 
 
+_RESET_STATUSES = {TaskStatus.failed}
+
+
 @dataclass
 class ImportResult:
     created: int
+    reset: int
     skipped: int
+
+
+async def _reset_task(session: AsyncSession, task: ParseTask) -> None:
+    """Сбрасывает завершённую задачу обратно в pending для повторного парсинга.
+
+    Удаляет старые результаты чтобы не было конфликтов UniqueConstraint.
+    """
+    await delete_task_results(session, task)
+    task.status = TaskStatus.pending
+    task.checkpoint_step = CheckpointStep.init
+    task.checkpoint_data = None
+    task.last_error = None
+    task.last_error_type = None
+    task.finished_at = None
+    task.started_at = None
+    task.locked_by = None
+    task.lock_expires_at = None
+    task.worker_name = None
 
 
 async def import_tasks(session: AsyncSession, rows: list[InputRow]) -> ImportResult:
     """Импортирует fedresurs-задачи в parse_tasks для каждого валидного ИНН.
 
-    Уже существующие задачи пропускаются без ошибки.
-    Commit выполняется один раз в конце для эффективности.
+    Сравнивает список ИНН из файла с БД:
+    - Если список изменился (добавлены/удалены/изменены ИНН) — полный сброс:
+      удаляет все fedresurs и kad_arbitr задачи, создаёт заново из файла.
+    - Если список не изменился — только failed задачи сбрасываются для повторной попытки.
     """
+    file_inns = {row.inn for row in rows}
+    db_inns = await get_all_source_values(session, TaskType.fedresurs.value)
+
+    # Файл изменился — полный сброс обоих типов задач
+    if file_inns != db_inns:
+        deleted_fed = await delete_all_tasks_by_type(session, TaskType.fedresurs.value)
+        deleted_kad = await delete_all_tasks_by_type(session, TaskType.kad_arbitr.value)
+        logger.info(
+            "File changed: deleted %d fedresurs + %d kad_arbitr tasks",
+            deleted_fed, deleted_kad,
+        )
+
+        for row in rows:
+            await create_task(session, TaskType.fedresurs.value, row.inn)
+
+        await session.commit()
+        logger.info("Import complete: created=%d (full reset)", len(rows))
+        return ImportResult(created=len(rows), reset=0, skipped=0)
+
+    # Файл не изменился — только retry failed
     created = 0
+    reset = 0
     skipped = 0
 
     for row in rows:
-        if await task_exists(session, TaskType.fedresurs.value, row.inn):
-            logger.debug("Skip existing: %s / %s", TaskType.fedresurs.value, row.inn)
-            skipped += 1
+        existing = await get_task(session, TaskType.fedresurs.value, row.inn)
+        if existing:
+            if existing.status in _RESET_STATUSES:
+                await _reset_task(session, existing)
+                logger.debug("Reset failed: %s / %s", TaskType.fedresurs.value, row.inn)
+                reset += 1
+            else:
+                skipped += 1
         else:
             await create_task(session, TaskType.fedresurs.value, row.inn)
-            logger.debug("Queue: %s / %s", TaskType.fedresurs.value, row.inn)
             created += 1
 
     await session.commit()
-    logger.info("Import complete: created=%d, skipped=%d", created, skipped)
-    return ImportResult(created=created, skipped=skipped)
+    logger.info("Import complete: created=%d, reset=%d, skipped=%d", created, reset, skipped)
+    return ImportResult(created=created, reset=reset, skipped=skipped)
+
+
+async def import_kad_arbitr_tasks(session: AsyncSession) -> ImportResult:
+    """Импортирует kad_arbitr-задачи из fedresurs_results.case_number.
+
+    Берёт уникальные номера дел из завершённых fedresurs-задач.
+    Завершённые задачи сбрасываются в pending для повторного парсинга.
+    """
+    case_numbers = await get_case_numbers_for_kad_import(session)
+    created = 0
+    reset = 0
+    skipped = 0
+
+    for cn in case_numbers:
+        existing = await get_task(session, TaskType.kad_arbitr.value, cn)
+        if existing:
+            if existing.status in _RESET_STATUSES:
+                await _reset_task(session, existing)
+                logger.debug("Reset: %s / %s", TaskType.kad_arbitr.value, cn)
+                reset += 1
+            else:
+                logger.debug("Skip in-progress: %s / %s", TaskType.kad_arbitr.value, cn)
+                skipped += 1
+        else:
+            await create_task(session, TaskType.kad_arbitr.value, cn)
+            logger.debug("Queue: %s / %s", TaskType.kad_arbitr.value, cn)
+            created += 1
+
+    await session.commit()
+    logger.info("Import kad_arbitr complete: created=%d, reset=%d, skipped=%d", created, reset, skipped)
+    return ImportResult(created=created, reset=reset, skipped=skipped)
 
 
 async def recover_stale_tasks(session: AsyncSession) -> int:

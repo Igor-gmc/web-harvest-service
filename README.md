@@ -36,7 +36,7 @@ alembic upgrade head
 ### 4. Входные данные
 
 Положить Excel-файл со списком ИНН в `input/identifiers.xlsx`.
-Первая колонка — ИНН, первая строка — заголовок (пропускается).
+Первая колонка — ИНН, таблица без заголовков (читаются все строки).
 
 ### 5. Запуск
 
@@ -44,11 +44,26 @@ alembic upgrade head
 python -m src.main
 ```
 
-Приложение при старте:
+## Pipeline
+
+Приложение при старте выполняет двухпроходный pipeline:
+
+**Проход 1 — fedresurs:**
 1. Проверяет подключение к БД
-2. Импортирует ИНН из Excel в таблицу задач (идемпотентно)
-3. Восстанавливает зависшие задачи (recovery)
-4. Обрабатывает все задачи последовательно, переиспользуя одну вкладку браузера
+2. Импортирует ИНН из Excel в таблицу задач
+3. Импортирует kad_arbitr задачи из результатов fedresurs (пока пусто)
+4. Восстанавливает зависшие задачи (recovery)
+5. Обрабатывает все pending задачи (fedresurs)
+
+**Проход 2 — kad.arbitr:**
+6. Импортирует kad_arbitr задачи из `fedresurs_results.case_number`
+7. Обрабатывает все pending kad_arbitr задачи
+
+### Детекция изменений файла
+
+При каждом запуске сравнивается набор ИНН из Excel с набором в БД:
+- **Файл не изменился** — пропускает уже обработанные задачи, повторяет только failed
+- **Файл изменился** (добавлен/удалён/изменён ИНН) — полный сброс: удаляет все задачи и результаты обоих типов, парсит заново с нуля
 
 ## Архитектура
 
@@ -65,71 +80,57 @@ src/
 │   └── session.py           # AsyncSession factory
 ├── schemas/
 │   ├── input.py             # InputRow, ExcelReadResult
-│   └── results.py           # FedresursResultData
+│   ├── results.py           # FedresursResultData
+│   └── kad_result.py        # KadArbitrResultData
 ├── services/
 │   ├── excel_reader.py      # Чтение и валидация Excel
 │   ├── task_service.py      # import, complete, fail, not_found, recover
 │   ├── task_executor.py     # Оркестрация: heartbeat → parse → save → complete
-│   └── worker_service.py    # acquire → execute → reuse page loop
+│   └── worker_runner.py     # acquire → execute → reuse page loop
 ├── browser/
 │   ├── factory.py           # BrowserFactory (CDP)
 │   ├── page_helpers.py      # detect_block, find_element, human_delay, screenshots
-│   └── selectors.py         # CSS-селекторы fedresurs.ru
+│   └── selectors.py         # CSS-селекторы fedresurs.ru и kad.arbitr.ru
 └── parsers/
     ├── base.py              # BaseParser (ABC)
-    └── fedresurs.py         # FedresursParser
+    ├── fedresurs.py         # FedresursParser
+    └── kad_arbitr.py        # KadArbitrParser
 ```
+
+### Два парсера — один паттерн
+
+Оба парсера следуют одному архитектурному паттерну, но каждый знает только свой сайт:
+
+| | FedresursParser | KadArbitrParser |
+|---|---|---|
+| **Вход** | ИНН из Excel | Номер дела из `fedresurs_results` |
+| **Сайт** | fedresurs.ru | kad.arbitr.ru |
+| **Результат** | case_number + last_publication_date | document_date + document_name + PDF URL |
+| **Таблица** | `fedresurs_results` | `kad_arbitr_results` |
 
 ### Переиспользование вкладки
 
-Вкладка браузера **не закрывается** между задачами — это экономит время на открытие/закрытие и снижает нагрузку:
+Вкладка браузера **не закрывается** между задачами одного типа — это экономит время и снижает нагрузку:
 
-- **Успешный парсинг** — после извлечения данных парсер кликает по логотипу для возврата на главную страницу, затем вводит следующий ИНН без перезагрузки
-- **"Ничего не найдено"** — вкладка остаётся на странице результатов, поле ввода очищается, вводится следующий ИНН, нажимается Enter
+- **Успешный парсинг** — парсер кликает логотип для возврата на главную, вводит следующий запрос
+- **"Ничего не найдено"** — вкладка остаётся на странице, поле очищается, вводится следующий запрос
 - **Ошибка** — вкладка закрывается, для следующей задачи открывается новая
-
-```
-Задача 1 → поиск → данные найдены → клик логотип → главная
-Задача 2 → ввод ИНН → поиск → "Ничего не найдено" → фиксируем → очищаем поле
-Задача 3 → ввод ИНН → поиск → данные найдены → клик логотип → главная
-Задача 4 → ввод ИНН → поиск → ...
-```
+- **Смена task_type** — при переходе от fedresurs к kad_arbitr (или наоборот) вкладка освобождается, открывается новая для другого сайта
 
 ### Имитация поведения пользователя (human_delay)
 
-Для снижения риска блокировки все поведенческие паузы между действиями выполняются со **случайной задержкой**. Значение генерируется заново для каждого этапа через `random.uniform(1, HUMAN_DELAY_MAX_SECONDS)`.
-
-Управляется **одной переменной** в `.env`:
+Все паузы между действиями выполняются со **случайной задержкой** `random.uniform(1, HUMAN_DELAY_MAX_SECONDS)`.
 
 ```env
 HUMAN_DELAY_MAX_SECONDS=10
 ```
-
-- Минимум: **1 секунда** (захардкожен, чтобы не отправлять запросы мгновенно)
-- Максимум: значение из конфига (по умолчанию **10 секунд**)
-- Каждый вызов `human_delay()` генерирует **новое случайное значение** в диапазоне `[1, max]`
-
-Этапы, на которых применяется `human_delay`:
-
-| Этап | Описание |
-|------|----------|
-| Детекция блокировки | Ожидание рендеринга Angular перед проверкой |
-| После поиска | Ожидание перехода на страницу результатов |
-| Загрузка панели вкладок | Ожидание после появления tab panel |
-| Перед кликом "Вся информация" | Пауза перед переходом в карточку |
-| Рендеринг карточки | Ожидание отрисовки Angular-секций |
-| Перед кликом логотипа | Пауза перед возвратом на главную |
-| Перед повторным поиском | Пауза перед вводом нового ИНН на странице результатов |
-| После Enter (повторный поиск) | Ожидание обновления результатов |
-
-Таймауты ожидания элементов (`wait_for_selector`, `wait_for_url`) **не рандомизируются** — это максимальные лимиты ожидания появления элемента на странице.
 
 ### Lifecycle задачи
 
 ```
 pending ──→ in_progress ──→ done
                 │
-                ├──→ not_found (ИНН не найден / нет данных о банкротстве)
+                ├──→ not_found (ИНН не найден / нет данных / пустая хронология)
                 │
                 ├──→ failed
                 │
@@ -139,7 +140,7 @@ pending ──→ in_progress ──→ done
 ```
 
 - **Lock-based ownership**: `locked_by`, `lock_expires_at`, `worker_name`
-- **Heartbeat**: воркер периодически продлевает `lock_expires_at`, доказывая что жив
+- **Heartbeat**: воркер периодически продлевает `lock_expires_at`
 - **Recovery**: при старте находит `in_progress` задачи с просроченным lock и возвращает в очередь
 - **Приоритет**: `resume_pending` обрабатывается раньше `pending`
 
@@ -156,60 +157,15 @@ pending ──→ in_progress ──→ done
 
 ### Симптом
 
-При запуске Playwright для парсинга fedresurs.ru сайт возвращал **403 Forbidden** — независимо от:
-- Режима браузера (headless / visible)
-- Движка (Chromium / Firefox)
-- User-Agent
-- Persistent profile
-- `channel="chrome"` (системный Chrome через Playwright)
-
-При этом **обычный Chrome** (запущенный вручную) открывал сайт без проблем с того же IP.
-
-### Диагностика
-
-1. Сохранение screenshot + HTML при ошибке показало страницу-заглушку CDN с `403 Error`
-2. IP на странице блокировки совпадал с реальным IP машины — значит, не гео-блок
-3. Firefox тоже получал 403 — значит, не TLS-fingerprint конкретного Chromium
-4. `headless=False` тоже 403 — значит, не headless-детекция
-
-**Вывод**: CDN fedresurs.ru определяет Playwright по флагам запуска, которые Playwright добавляет к Chrome: `--enable-automation`, `--remote-debugging-pipe`, `--disable-background-networking` и другие. Эти флаги меняют поведение браузера и детектятся на стороне WAF.
+При запуске Playwright для парсинга fedresurs.ru сайт возвращал **403 Forbidden** — независимо от режима браузера, движка и User-Agent. При этом **обычный Chrome** открывал сайт без проблем.
 
 ### Решение: CDP (Chrome DevTools Protocol)
 
-Вместо того чтобы позволять Playwright запускать Chrome (с automation-флагами), мы:
+Вместо Playwright-запуска Chrome (с automation-флагами) мы:
 
-1. **Запускаем Chrome сами** через `subprocess.Popen` с минимальными флагами:
-   ```
-   chrome.exe --remote-debugging-port=9222 --user-data-dir=<temp> --no-first-run
-   ```
-   Никаких `--enable-automation` — браузер неотличим от обычного.
-
-2. **Подключаем Playwright через CDP**:
-   ```python
-   browser = await playwright.chromium.connect_over_cdp("http://localhost:9222")
-   ```
-   Playwright получает полный контроль над вкладками, но fingerprint остаётся чистым.
-
-3. **Автоматический lifecycle**:
-   - `start()` — запускает Chrome, ждёт CDP-порт, подключается
-   - `close()` — отключается, `terminate()` Chrome, чистит temp-профиль
-
-Пользователю ничего не нужно делать вручную — `BrowserFactory` управляет всем сам.
-
-### Что не сработало (для справки)
-
-| Подход | Результат |
-|--------|-----------|
-| Playwright bundled Chromium | 403 |
-| Playwright Firefox | 403 |
-| `channel="chrome"` (Playwright запускает системный Chrome) | 403 |
-| `--headless=new` (новый headless Chrome) | 403 |
-| `headless=False` (видимый браузер через Playwright) | 403 |
-| Persistent context с профилем | 403 |
-| `--disable-blink-features=AutomationControlled` | 403 |
-| Подмена `navigator.webdriver` | 403 |
-| Реалистичный User-Agent + locale + timezone | 403 |
-| **subprocess + CDP (без Playwright-флагов)** | **Работает** |
+1. **Запускаем Chrome сами** через `subprocess.Popen` с минимальными флагами — без `--enable-automation`
+2. **Подключаем Playwright через CDP** — полный контроль при чистом fingerprint
+3. **Автоматический lifecycle** через `BrowserFactory`
 
 ## Конфигурация (.env)
 
@@ -231,8 +187,7 @@ BROWSER_TIMEOUT_MS=30000
 CDP_PORT=9222
 MAX_BROWSER_PAGES=3
 
-# Имитация пользователя — максимальная задержка между действиями (секунды)
-# Каждый этап получает случайную паузу от 1 до этого значения
+# Имитация пользователя
 HUMAN_DELAY_MAX_SECONDS=10
 
 # Блокировки и heartbeat
@@ -251,15 +206,16 @@ HEARTBEAT_INTERVAL_SECONDS=15
 
 - [x] Каркас проекта, Docker, конфиг
 - [x] БД: модели, миграции, репозитории
-- [x] Excel reader с валидацией ИНН
-- [x] Импорт задач (идемпотентный)
+- [x] Excel reader с валидацией ИНН (без заголовков)
+- [x] Импорт задач с детекцией изменений файла
 - [x] Lifecycle задачи: acquire, heartbeat, complete/fail/not_found
 - [x] Recovery зависших задач
 - [x] Browser layer (CDP, обход WAF)
-- [x] FedresursParser: полный цикл (поиск, извлечение данных о банкротстве)
-- [x] Переиспользование вкладки (без закрытия/открытия между задачами)
+- [x] FedresursParser: поиск по ИНН, извлечение case_number + дата публикации
+- [x] KadArbitrParser: поиск по номеру дела, извлечение даты + названия документа + PDF
+- [x] Двухпроходный pipeline: fedresurs → kad.arbitr (из результатов fedresurs)
+- [x] Переиспользование вкладки (с корректным сбросом при смене сайта)
 - [x] Имитация пользователя (random задержки между этапами)
 - [x] Worker loop (обработка всех задач)
 - [ ] Retry-механика
-- [ ] KadArbitr parser
 - [ ] Proxy support

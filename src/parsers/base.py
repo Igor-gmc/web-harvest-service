@@ -3,7 +3,6 @@ from typing import Awaitable, Callable
 
 from src.browser.factory import BrowserFactory
 from src.db.models import ParseTask
-from src.schemas.results import FedresursResultData
 
 CheckpointFn = Callable[..., Awaitable[None]]
 
@@ -16,6 +15,6 @@ class BaseParser(ABC):
     """
 
     @abstractmethod
-    async def parse(self, task: ParseTask, factory: BrowserFactory) -> list[FedresursResultData]:
+    async def parse(self, task: ParseTask, factory: BrowserFactory) -> list:
         """Выполняет парсинг и возвращает список результатов."""
         ...

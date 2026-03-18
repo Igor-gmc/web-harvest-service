@@ -1,4 +1,4 @@
-"""Селекторы для fedresurs.ru.
+"""Селекторы для fedresurs.ru и kad.arbitr.ru.
 
 Селекторы на реальных сайтах часто меняются, поэтому для каждого элемента
 хранится список кандидатов — от самого надёжного к менее надёжному.
@@ -88,4 +88,72 @@ FEDRESURS_PUBLICATIONS_CANDIDATES: list[str] = [
     '.bankruptcy-block entity-card-bankruptcy-publication-wrapper.pub-item a.underlined[href*="bankruptmessages"]',
     '.bankruptcy-block entity-card-bankruptcy-publication-wrapper.pub-item',
     'entity-card-bankruptcy-publication-wrapper.pub-item',
+]
+
+
+# =====================================================================
+# kad.arbitr.ru
+# =====================================================================
+
+KAD_URL = "https://kad.arbitr.ru/"
+
+# Поле ввода номера дела (placeholder "например, А50-5568/08")
+KAD_SEARCH_INPUT_CANDIDATES: list[str] = [
+    '#sug-cases input.g-ph',
+    '#sug-cases input[type="text"]',
+    '.b-selected-tags#sug-cases input',
+    '#sug-cases input',
+]
+
+# --- Реакция на поиск ---
+
+# Таблица с результатами
+KAD_RESULTS_TABLE_CANDIDATES: list[str] = [
+    '#b-cases',
+    '.b-results table.b-cases',
+    '.b-results .b-cases_wrapper table',
+]
+
+# Ссылка на дело внутри таблицы результатов
+KAD_CASE_LINK_CANDIDATES: list[str] = [
+    '#b-cases a.num_case',
+    '.b-cases a.num_case',
+    'td.num a.num_case',
+]
+
+# "Нет результатов"
+KAD_NO_RESULTS_CANDIDATES: list[str] = [
+    '.b-noResults:not(.g-hidden)',
+    '.b-noResults h2',
+]
+
+# Индикатор загрузки
+KAD_LOADING_CANDIDATES: list[str] = [
+    '.b-case-loading:not([style*="display: none"])',
+]
+
+# Логотип "Электронное правосудие" (возврат на главную)
+KAD_LOGO_CANDIDATES: list[str] = [
+    '.b-arbitr-header-title a[href="/"]',
+    'td.b-arbitr-header-title a[href="/"]',
+    'h1 + a[href="/"]',
+]
+
+# --- Карточка дела ---
+
+# Хронология дела на странице карточки
+KAD_CHRONO_TABLE_CANDIDATES: list[str] = [
+    '.b-case-chrono',
+    '#main-column .b-case-chrono',
+    '.b-case-card-content .b-case-chrono',
+]
+
+# Дата внутри хронологии
+KAD_CHRONO_DATE_SELECTOR = 'span.b-reg-date'
+
+# Документ (название + ссылка на PDF)
+KAD_CHRONO_DOCUMENT_CANDIDATES: list[str] = [
+    'h2.b-case-result a[href*="PdfDocument"]',
+    'h2.b-case-result a',
+    '.b-case-result a',
 ]
