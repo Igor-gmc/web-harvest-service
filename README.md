@@ -1,75 +1,89 @@
 # Web Harvest Service
 
-Сервис для автоматического сбора данных о банкротстве с сайтов [fedresurs.ru](https://fedresurs.ru) и [kad.arbitr.ru](https://kad.arbitr.ru) по списку ИНН из Excel-файла.
+Веб-сервис для автоматического сбора данных о банкротстве с сайтов [fedresurs.ru](https://fedresurs.ru) и [kad.arbitr.ru](https://kad.arbitr.ru) по списку ИНН из Excel-файла. Предоставляет веб-интерфейс для загрузки файла, управления парсингом и скачивания результатов.
+
+## Как пользоваться
+
+1. Откройте веб-интерфейс в браузере (по умолчанию `http://localhost:8000`)
+2. Загрузите `.xlsx` файл со списком ИНН (перетащите или нажмите на зону загрузки)
+3. Нажмите **Запустить парсинг** — сервис последовательно обработает каждый ИНН:
+   - Найдёт номер дела на fedresurs.ru
+   - По номеру дела найдёт документы на kad.arbitr.ru
+4. Следите за прогрессом в статус-баре (в очереди / в работе / готово / ошибок)
+5. Парсинг можно **остановить** и **продолжить** в любой момент
+6. После завершения (или на паузе) нажмите **Скачать результаты (.xlsx)**
+
+### Формат входного файла
+
+Файл `.xlsx` без заголовков. Первая колонка — ИНН (10 или 12 цифр). Все строки считываются.
 
 ## Стек
 
 - **Python 3.11** + asyncio
+- **FastAPI** + Uvicorn — веб-сервер и API
 - **Playwright** — браузерная автоматизация через CDP
 - **PostgreSQL 16** + SQLAlchemy 2.0 (async) + Alembic
 - **Pydantic Settings** — конфигурация из `.env`
-- **Docker Compose** — PostgreSQL
+- **Docker Compose** — PostgreSQL + приложение
 
-## Быстрый старт
+## Запуск
 
-### 1. Зависимости
+### Вариант 1: Локально
+
+**Требования:** Python 3.11+, Google Chrome, PostgreSQL 16.
 
 ```bash
+# 1. Виртуальное окружение
 python -m venv venv
 venv\Scripts\activate        # Windows
+# source venv/bin/activate   # Linux / macOS
+
+# 2. Зависимости
 pip install -r requirements.txt
 playwright install chromium
-```
 
-### 2. PostgreSQL
+# 3. PostgreSQL (через Docker)
+docker compose up -d postgres
 
-```bash
-docker compose up -d
-```
+# 4. Создать .env (или использовать значения по умолчанию)
+cp .env.example .env  # отредактируйте при необходимости
 
-### 3. Миграции
-
-```bash
+# 5. Миграции
 alembic upgrade head
+
+# 6. Запуск веб-сервера
+uvicorn src.web.app:app --host 0.0.0.0 --port 8000
 ```
 
-### 4. Входные данные
+Откройте `http://localhost:8000` в браузере.
 
-Положить Excel-файл со списком ИНН в `input/identifiers.xlsx`.
-Первая колонка — ИНН, таблица без заголовков (читаются все строки).
+### Вариант 2: Docker (полный сервис на хосте)
 
-### 5. Запуск
+**Требования:** Docker и Docker Compose.
 
 ```bash
-python -m src.main
+# Собрать и запустить всё (приложение + PostgreSQL)
+docker compose up -d --build
 ```
 
-## Pipeline
+Сервис будет доступен на `http://localhost:8000`. PostgreSQL поднимается автоматически, миграции применяются при старте контейнера.
 
-Приложение при старте выполняет двухпроходный pipeline:
+Для остановки:
 
-**Проход 1 — fedresurs:**
-1. Проверяет подключение к БД
-2. Импортирует ИНН из Excel в таблицу задач
-3. Импортирует kad_arbitr задачи из результатов fedresurs (пока пусто)
-4. Восстанавливает зависшие задачи (recovery)
-5. Обрабатывает все pending задачи (fedresurs)
-
-**Проход 2 — kad.arbitr:**
-6. Импортирует kad_arbitr задачи из `fedresurs_results.case_number`
-7. Обрабатывает все pending kad_arbitr задачи
-
-### Детекция изменений файла
-
-При каждом запуске сравнивается набор ИНН из Excel с набором в БД:
-- **Файл не изменился** — пропускает уже обработанные задачи, повторяет только failed
-- **Файл изменился** (добавлен/удалён/изменён ИНН) — полный сброс: удаляет все задачи и результаты обоих типов, парсит заново с нуля
+```bash
+docker compose down          # остановить контейнеры
+docker compose down -v       # остановить и удалить данные БД
+```
 
 ## Архитектура
 
 ```
 src/
-├── main.py                  # Точка входа, startup pipeline
+├── main.py                  # CLI точка входа (автономный pipeline)
+├── web/
+│   ├── app.py               # FastAPI-приложение, API-эндпоинты
+│   └── static/
+│       └── index.html       # Веб-интерфейс (SPA)
 ├── core/
 │   ├── config.py            # Pydantic Settings из .env
 │   ├── enums.py             # TaskStatus, TaskType, CheckpointStep, ErrorType
@@ -97,6 +111,13 @@ src/
     └── kad_arbitr.py        # KadArbitrParser
 ```
 
+### Два режима запуска
+
+| Режим | Команда | Описание |
+|-------|---------|----------|
+| **Веб-сервер** | `uvicorn src.web.app:app` | FastAPI + веб-интерфейс, управление через браузер |
+| **CLI pipeline** | `python -m src.main` | Автономный запуск без UI, парсит весь файл и завершается |
+
 ### Два парсера — один паттерн
 
 Оба парсера следуют одному архитектурному паттерну, но каждый знает только свой сайт:
@@ -108,64 +129,54 @@ src/
 | **Результат** | case_number + last_publication_date | document_date + document_name + PDF URL |
 | **Таблица** | `fedresurs_results` | `kad_arbitr_results` |
 
+### Параллельная работа парсеров
+
+Stage 1 (fedresurs) и Stage 2 (kad_arbitr) запускаются параллельно в отдельных браузерах (CDP-порты 9222 и 9223). Stage 2 поллит БД, подхватывая номера дел по мере появления результатов от Stage 1.
+
 ### Переиспользование вкладки
 
-Вкладка браузера **не закрывается** между задачами одного типа — это экономит время и снижает нагрузку:
+Вкладка браузера **не закрывается** между задачами одного типа:
 
-- **Успешный парсинг** — парсер кликает логотип для возврата на главную, вводит следующий запрос
-- **"Ничего не найдено"** — вкладка остаётся на странице, поле очищается, вводится следующий запрос
+- **Успешный парсинг** — парсер возвращается на главную, вводит следующий запрос
+- **"Ничего не найдено"** — поле очищается, вводится следующий запрос
 - **Ошибка** — вкладка закрывается, для следующей задачи открывается новая
-- **Смена task_type** — при переходе от fedresurs к kad_arbitr (или наоборот) вкладка освобождается, открывается новая для другого сайта
-
-### Имитация поведения пользователя (human_delay)
-
-Все паузы между действиями выполняются со **случайной задержкой** `random.uniform(1, HUMAN_DELAY_MAX_SECONDS)`.
-
-```env
-HUMAN_DELAY_MAX_SECONDS=10
-```
 
 ### Lifecycle задачи
 
 ```
 pending ──→ in_progress ──→ done
                 │
-                ├──→ not_found (ИНН не найден / нет данных / пустая хронология)
-                │
+                ├──→ not_found
                 ├──→ failed
-                │
-                └──→ resume_pending (recovery зависших)
-                        │
-                        └──→ in_progress (повторная обработка)
+                └──→ resume_pending (recovery) ──→ in_progress
 ```
 
 - **Lock-based ownership**: `locked_by`, `lock_expires_at`, `worker_name`
 - **Heartbeat**: воркер периодически продлевает `lock_expires_at`
 - **Recovery**: при старте находит `in_progress` задачи с просроченным lock и возвращает в очередь
-- **Приоритет**: `resume_pending` обрабатывается раньше `pending`
 
 ### Separation of Concerns
 
 | Слой | Ответственность |
 |------|----------------|
+| **Web (FastAPI)** | API-эндпоинты, загрузка файлов, статус, скачивание результатов |
 | **Worker** | Берёт задачу из очереди, управляет переиспользованием вкладки |
 | **Executor** | Heartbeat + выбор парсера + сохранение результата + завершение |
 | **Parser** | Только получение данных (ничего не знает про БД и lifecycle) |
 | **BrowserFactory** | Управление Chrome (запуск, подключение, закрытие) |
 
-## Проблема с Chrome и как её решили
+## API
 
-### Симптом
-
-При запуске Playwright для парсинга fedresurs.ru сайт возвращал **403 Forbidden** — независимо от режима браузера, движка и User-Agent. При этом **обычный Chrome** открывал сайт без проблем.
-
-### Решение: CDP (Chrome DevTools Protocol)
-
-Вместо Playwright-запуска Chrome (с automation-флагами) мы:
-
-1. **Запускаем Chrome сами** через `subprocess.Popen` с минимальными флагами — без `--enable-automation`
-2. **Подключаем Playwright через CDP** — полный контроль при чистом fingerprint
-3. **Автоматический lifecycle** через `BrowserFactory`
+| Метод | Путь | Описание |
+|-------|------|----------|
+| `GET` | `/` | Веб-интерфейс |
+| `POST` | `/api/upload` | Загрузка `.xlsx` файла |
+| `POST` | `/api/start` | Запуск парсинга |
+| `POST` | `/api/stop` | Остановка парсинга |
+| `POST` | `/api/resume` | Продолжение парсинга |
+| `GET` | `/api/status` | Текущий статус (running, счётчики задач) |
+| `GET` | `/api/results` | Результаты в JSON |
+| `GET` | `/api/results/download` | Скачать результаты в `.xlsx` |
 
 ## Конфигурация (.env)
 
@@ -195,27 +206,42 @@ LOCK_TTL_SECONDS=60
 HEARTBEAT_INTERVAL_SECONDS=15
 ```
 
-## Требования
+## Проблема с Chrome и как её решили
 
-- **Python** 3.11+
-- **Google Chrome** установлен в системе
-- **PostgreSQL** 16 (через Docker или локально)
-- **Playwright** + Chromium (`playwright install chromium`)
+При запуске Playwright для парсинга fedresurs.ru сайт возвращал **403 Forbidden** — независимо от режима браузера и User-Agent. Обычный Chrome открывал сайт без проблем.
+
+**Решение: CDP (Chrome DevTools Protocol)**
+
+1. Chrome запускается через `subprocess.Popen` без `--enable-automation`
+2. Playwright подключается через CDP — полный контроль при чистом fingerprint
+3. Автоматический lifecycle через `BrowserFactory`
+
+## Ключевые слова (GitHub Topics)
+
+```
+bankruptcy, bankrupt, банкротство, арбитраж, arbitration-court,
+fedresurs, kad-arbitr, parser, web-scraper, inn, инн,
+конкурсное-производство, реализация-имущества, судебные-акты,
+должник, кассация, арбитражные-дела,
+playwright, cdp, python, asyncio, fastapi, postgresql,
+data-extraction, court-documents, russian-bankruptcy
+```
 
 ## Текущий статус
 
 - [x] Каркас проекта, Docker, конфиг
 - [x] БД: модели, миграции, репозитории
-- [x] Excel reader с валидацией ИНН (без заголовков)
+- [x] Excel reader с валидацией ИНН
 - [x] Импорт задач с детекцией изменений файла
 - [x] Lifecycle задачи: acquire, heartbeat, complete/fail/not_found
 - [x] Recovery зависших задач
 - [x] Browser layer (CDP, обход WAF)
 - [x] FedresursParser: поиск по ИНН, извлечение case_number + дата публикации
 - [x] KadArbitrParser: поиск по номеру дела, извлечение даты + названия документа + PDF
-- [x] Двухпроходный pipeline: fedresurs → kad.arbitr (из результатов fedresurs)
-- [x] Переиспользование вкладки (с корректным сбросом при смене сайта)
-- [x] Имитация пользователя (random задержки между этапами)
-- [x] Worker loop (обработка всех задач)
+- [x] Параллельный pipeline: fedresurs + kad.arbitr одновременно
+- [x] Переиспользование вкладки
+- [x] Имитация пользователя (random задержки)
+- [x] Веб-интерфейс (FastAPI + SPA)
+- [x] Docker Compose (приложение + PostgreSQL)
 - [ ] Retry-механика
 - [ ] Proxy support
