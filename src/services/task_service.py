@@ -108,6 +108,20 @@ async def not_found_task(
     logger.info("Task not_found: id=%d, source_value=%s", task.id, task.source_value)
 
 
+async def update_checkpoint(
+    session: AsyncSession,
+    task: ParseTask,
+    step: CheckpointStep,
+    data: dict | None = None,
+) -> None:
+    """Обновляет checkpoint задачи и записывает событие."""
+    task.checkpoint_step = step.value
+    if data is not None:
+        task.checkpoint_data = {**(task.checkpoint_data or {}), **data}
+    await create_task_event(session, task.id, f"checkpoint_{step.value}")
+    await session.commit()
+
+
 async def fail_task(
     session: AsyncSession,
     task: ParseTask,

@@ -5,10 +5,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.browser.factory import BrowserFactory
 from src.core.config import settings
+from src.core.enums import CheckpointStep, ErrorType
 from src.core.logger import get_logger
 from src.db.models import ParseTask
 from src.db.repositories import refresh_heartbeat, save_fedresurs_result
-from src.services.task_service import complete_task, fail_task, not_found_task
+from src.services.task_service import complete_task, fail_task, not_found_task, update_checkpoint
 
 logger = get_logger(__name__)
 
@@ -53,14 +54,22 @@ async def execute_task(
 
     await heartbeat_loop()
 
+    async def _checkpoint(step: CheckpointStep, data: dict | None = None) -> None:
+        await update_checkpoint(session, task, step, data)
+
     try:
         results = await parser.parse(
             task, factory,
             reuse_page=reuse_page,
             reuse_on_results=reuse_on_results,
+            checkpoint=_checkpoint,
         )
     except Exception as exc:
-        from src.parsers.fedresurs import NoBankruptcyDataError, NoResultsFoundError
+        from src.parsers.fedresurs import (
+            NoBankruptcyDataError,
+            NoResultsFoundError,
+            SiteAccessBlockedError,
+        )
 
         if isinstance(exc, NoResultsFoundError):
             await not_found_task(session, task, str(exc))
@@ -70,7 +79,11 @@ async def execute_task(
             await not_found_task(session, task, str(exc))
             return None, False
 
-        await fail_task(session, task, f"{type(exc).__name__}: {exc}")
+        error_type = ErrorType.unknown
+        if isinstance(exc, SiteAccessBlockedError):
+            error_type = ErrorType.temporary
+
+        await fail_task(session, task, f"{type(exc).__name__}: {exc}", error_type)
         logger.error("TaskExecutor failed: id=%d, error=%s", task.id, exc)
         return None, False
 

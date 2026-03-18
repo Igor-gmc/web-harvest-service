@@ -32,10 +32,10 @@ class ErrorType(str, enum.Enum):
 
 class CheckpointStep(str, enum.Enum):
     init = "init"
-    started = "started"
+    site_opened = "site_opened"
     search_submitted = "search_submitted"
-    result_found = "result_found"
+    results_loaded = "results_loaded"
     card_opened = "card_opened"
-    tab_opened = "tab_opened"
+    bankruptcy_found = "bankruptcy_found"
     data_extracted = "data_extracted"
     done = "done"

@@ -6,10 +6,6 @@ from src.core.config import settings
 from src.core.logger import get_logger, setup_logger
 from src.db.session import async_session
 
-# Playwright требует ProactorEventLoop (default на Windows) для запуска subprocess.
-# asyncpg совместим с ProactorEventLoop начиная с Python 3.11.
-# Поэтому WindowsSelectorEventLoopPolicy здесь не нужна.
-
 
 async def check_db() -> None:
     logger = get_logger(__name__)
@@ -46,29 +42,22 @@ async def run_recovery() -> None:
         logger.info("Recovery: no stale tasks")
 
 
-async def run_all_tasks() -> None:
+async def run_worker_batch() -> None:
     from src.browser.factory import BrowserFactory
-    from src.services.worker_service import run_worker
+    from src.services.worker_runner import run_batch
 
     logger = get_logger(__name__)
-
     async with BrowserFactory() as factory:
-        logger.info("Browser ready, processing tasks...")
-        processed = 0
-        while True:
-            async with async_session() as session:
-                task_done = await run_worker(session, factory)
-            if not task_done:
-                break
-            processed += 1
-        logger.info("All tasks processed: total=%d", processed)
+        logger.info("Browser ready, starting worker batch...")
+        processed = await run_batch(factory)
+    logger.info("Worker batch finished: total=%d", processed)
 
 
 async def startup() -> None:
     await check_db()
     await run_import()
     await run_recovery()
-    await run_all_tasks()
+    await run_worker_batch()
 
 
 def main() -> None:

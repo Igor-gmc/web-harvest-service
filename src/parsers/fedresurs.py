@@ -26,9 +26,10 @@ from src.browser.selectors import (
     FEDRESURS_SEARCH_INPUT_CANDIDATES,
     FEDRESURS_TAB_PANEL_CANDIDATES,
 )
+from src.core.enums import CheckpointStep
 from src.core.logger import get_logger
 from src.db.models import ParseTask
-from src.parsers.base import BaseParser
+from src.parsers.base import BaseParser, CheckpointFn
 from src.schemas.results import FedresursResultData
 
 logger = get_logger(__name__)
@@ -76,7 +77,9 @@ class FedresursParser(BaseParser):
         factory: BrowserFactory,
         reuse_page: Page | None = None,
         reuse_on_results: bool = False,
+        checkpoint: CheckpointFn | None = None,
     ) -> list[FedresursResultData]:
+        self._checkpoint = checkpoint or self._noop_checkpoint
         inn = task.source_value
         logger.info("FedresursParser started: task_id=%d, inn=%s", task.id, inn)
 
@@ -122,6 +125,10 @@ class FedresursParser(BaseParser):
         )
         return results
 
+    @staticmethod
+    async def _noop_checkpoint(step: CheckpointStep, data: dict | None = None) -> None:
+        pass
+
     # ──────────────────────────────────────────────────────────────────────
     # Подэтап 1: главная → поиск → результаты → карточка
     # ──────────────────────────────────────────────────────────────────────
@@ -154,6 +161,8 @@ class FedresursParser(BaseParser):
                     f"{block_reason} | url={current_url} | See debug/fedresurs_blocked.png"
                 )
 
+        await self._checkpoint(CheckpointStep.site_opened, {"inn": inn})
+
         # --- Шаг 3: Находим поле ввода ---
         input_selector = await find_element_by_candidates(
             page, FEDRESURS_SEARCH_INPUT_CANDIDATES,
@@ -181,6 +190,8 @@ class FedresursParser(BaseParser):
         else:
             logger.info("Search button not found, pressing Enter, task_id=%d", task.id)
             await page.press(input_selector, "Enter")
+
+        await self._checkpoint(CheckpointStep.search_submitted, {"inn": inn})
 
         # --- Шаг 6: Ждём перехода на страницу результатов ---
         url_before = page.url
@@ -247,6 +258,7 @@ class FedresursParser(BaseParser):
             selector = selector2
 
         logger.info("Result card found: %s, task_id=%d", selector, task.id)
+        await self._checkpoint(CheckpointStep.results_loaded, {"inn": inn, "results_url": page.url})
 
         # --- Шаг 9: Клик "Вся информация" ---
         entity_link = await find_element_by_candidates(
@@ -270,6 +282,7 @@ class FedresursParser(BaseParser):
             await human_delay(page, "fallback after card click")
 
         logger.info("Entity card loaded: url=%s, task_id=%d", page.url, task.id)
+        await self._checkpoint(CheckpointStep.card_opened, {"inn": inn, "entity_url": page.url})
 
         # Даём Angular дорендерить все секции карточки
         await human_delay(page, "card rendering")
@@ -334,6 +347,7 @@ class FedresursParser(BaseParser):
         # --- Запускаем поиск нажатием Enter ---
         await page.press(input_selector, "Enter")
         logger.info("Search triggered via Enter on results page, task_id=%d", task.id)
+        await self._checkpoint(CheckpointStep.search_submitted, {"inn": inn})
 
         # --- Ждём обновления результатов ---
         await human_delay(page, "after Enter re-search")
@@ -392,6 +406,7 @@ class FedresursParser(BaseParser):
             selector = selector2
 
         logger.info("Result card found after re-search: %s, task_id=%d", selector, task.id)
+        await self._checkpoint(CheckpointStep.results_loaded, {"inn": inn, "results_url": page.url})
 
         # --- Клик "Вся информация" ---
         entity_link = await find_element_by_candidates(
@@ -416,6 +431,7 @@ class FedresursParser(BaseParser):
             await human_delay(page, "fallback after card click re-search")
 
         logger.info("Entity card loaded (re-search): url=%s, task_id=%d", page.url, task.id)
+        await self._checkpoint(CheckpointStep.card_opened, {"inn": inn, "entity_url": page.url})
 
         # Даём Angular дорендерить все секции карточки
         await human_delay(page, "card rendering re-search")
@@ -442,10 +458,12 @@ class FedresursParser(BaseParser):
                 f"See debug/fedresurs_no_bankruptcy_{task.id}.png"
             )
         logger.info("Bankruptcy block found: %s, task_id=%d", block_selector, task.id)
+        await self._checkpoint(CheckpointStep.bankruptcy_found, {"inn": inn, "entity_url": page.url})
 
         case_number = await self._extract_case_number(page, task)
         last_date = await self._extract_last_publication_date(page, task)
 
+        await self._checkpoint(CheckpointStep.data_extracted, {"inn": inn, "case_number": case_number})
         await save_debug_screenshot(page, f"fedresurs_bankruptcy_{task.id}.png")
 
         return case_number, last_date
